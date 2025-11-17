@@ -6,6 +6,7 @@ from custom_logger import CustomLogger
 from googleapiclient.discovery import build  # type: ignore
 import os
 import json
+import re
 from types import SimpleNamespace
 
 
@@ -14,18 +15,11 @@ class ASMRFetcher:
 
     This class interacts with the YouTube Data API to search for ASMR videos,
     keeps track of previously seen video IDs, filters out YouTube Shorts using
-    video duration, and appends new non-duplicate results to a JSON file.
+    video duration in seconds, and appends new non-duplicate results to a JSON file.
     """
 
-    def __init__(
-        self,
-        api_key,
-        query="ASMR",
-        max_pages=100,
-        results_per_page=50,
-        seen_file="seen_video_ids.txt",
-        json_output="asmr_results_new.json",
-    ):
+    def __init__(self, api_key, query="ASMR", max_pages=100, results_per_page=50,
+                 seen_file="seen_video_ids.txt", json_output="asmr_results_new.json"):
         """Initializes ASMRFetcher with API settings and storage paths.
 
         Args:
@@ -42,7 +36,7 @@ class ASMRFetcher:
         self.results_per_page = results_per_page
 
         # Ensure data folder exists
-        self.data_folder = "data"
+        self.data_folder = common.get_configs("data")
         os.makedirs(self.data_folder, exist_ok=True)
 
         # Store files inside /data
@@ -56,42 +50,82 @@ class ASMRFetcher:
         # Initialize YouTube API client
         self.youtube = build("youtube", "v3", developerKey=self.api_key)
 
-    def _is_short_video(self, iso_duration):
-        """Determines whether a video is a YouTube Short based on ISO 8601 duration.
-
-        YouTube Shorts are always **less than 60 seconds**.
-        Duration formats examples:
-            PT15S  -> 15 seconds
-            PT45S  -> 45 seconds
-            PT1M   -> 1 minute (NOT a short)
-            PT2M10S -> 2 minutes 10 seconds
-
-        Args:
-            iso_duration (str): ISO 8601 duration string returned by API.
-
-        Returns:
-            bool: True if the video is considered a Short, otherwise False.
+    # ------------------------------------------------------------
+    # Duration helpers
+    # ------------------------------------------------------------
+    def _duration_to_seconds(self, iso_duration: str) -> int:
         """
-        # If it contains minutes or hours, it's not a short
-        if "M" in iso_duration or "H" in iso_duration:
-            return False
+        Convert YouTube ISO 8601 duration (e.g., 'PT1H2M10S', 'PT15S', 'PT1M', 'P0D')
+        into total seconds.
+        """
 
-        # If duration only has seconds → Shorts category
-        # Example: PT30S
-        return True
+        # Special case: P0D -> 0 seconds
+        if iso_duration == "P0D":
+            return 0
 
+        # YouTube usually returns 'PT...' formats
+        yt_pattern = re.compile(
+            r"^PT"
+            r"(?:(\d+)H)?"
+            r"(?:(\d+)M)?"
+            r"(?:(\d+)S)?$"
+        )
+        match = yt_pattern.fullmatch(iso_duration)
+        if match:
+            hours = int(match.group(1) or 0)
+            minutes = int(match.group(2) or 0)
+            seconds = int(match.group(3) or 0)
+            return hours * 3600 + minutes * 60 + seconds
+
+        # More general ISO 8601 pattern: PnDTnHnMnS, with optional T-part
+        generic_pattern = re.compile(
+            r"^P"
+            r"(?:(\d+)D)?"
+            r"(?:T"
+            r"(?:(\d+)H)?"
+            r"(?:(\d+)M)?"
+            r"(?:(\d+)S)?"
+            r")?$"
+        )
+        match = generic_pattern.fullmatch(iso_duration)
+        if match:
+            days = int(match.group(1) or 0)
+            hours = int(match.group(2) or 0)
+            minutes = int(match.group(3) or 0)
+            seconds = int(match.group(4) or 0)
+            return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
+
+        # Fallback: unknown format
+        self.logger.warning(f"Could not parse duration: {iso_duration}")
+        return 0
+
+    def _is_short_video(self, iso_duration: str) -> bool:
+        """Determines whether a video is a YouTube Short (< 60 seconds)."""
+        total_seconds = self._duration_to_seconds(iso_duration)
+        return total_seconds < 60
+
+    # ------------------------------------------------------------
+    # Main fetch logic
+    # ------------------------------------------------------------
     def fetch_asmr_videos(self):
         """Fetches ASMR videos from YouTube, excluding Shorts, and stores results.
 
         Returns:
             list: Newly discovered ASMR videos (excluding Shorts).
         """
-        # Load previously seen IDs
+        # ------------------------------------------------------------
+        # Load previously seen IDs in a stable (ordered) way
+        # ------------------------------------------------------------
+        seen_ids_list = []  # preserves insertion order as in file
+        seen_ids_set = set()  # fast membership test
+
         if os.path.exists(self.seen_file):
             with open(self.seen_file, "r", encoding="utf-8") as f:
-                seen_ids = set(line.strip() for line in f if line.strip())
-        else:
-            seen_ids = set()
+                for line in f:
+                    vid = line.strip()
+                    if vid and vid not in seen_ids_set:
+                        seen_ids_list.append(vid)
+                        seen_ids_set.add(vid)
 
         new_items = []
         next_page_token = None
@@ -115,11 +149,11 @@ class ASMRFetcher:
                 title = item["snippet"]["title"]
 
                 # Skip if already processed previously
-                if video_id in seen_ids:
+                if video_id in seen_ids_set:
                     continue
 
                 # ------------------------------------------------------------
-                # EXCLUDE YOUTUBE SHORTS — Fetch duration
+                # Fetch duration and exclude Shorts
                 # ------------------------------------------------------------
                 details = self.youtube.videos().list(
                     part="contentDetails",
@@ -136,14 +170,19 @@ class ASMRFetcher:
                 if self._is_short_video(iso_duration):
                     continue
 
-                # Mark video as seen
-                seen_ids.add(video_id)
+                duration_seconds = self._duration_to_seconds(iso_duration)
+
+                # Mark video as seen (append at end to keep file stable)
+                seen_ids_list.append(video_id)
+                seen_ids_set.add(video_id)
 
                 # Store new valid ASMR video
                 new_items.append({
                     "videoId": video_id,
                     "title": title,
-                    "duration": iso_duration,
+                    "duration": duration_seconds,  # store as seconds
+                    # Optional: keep original string too:
+                    # "duration_iso": iso_duration,
                 })
 
             next_page_token = response.get("nextPageToken")
@@ -164,10 +203,11 @@ class ASMRFetcher:
                 existing_items = []
 
         # ------------------------------------------------------------
-        # Merge old + new results without duplicates
+        # Merge old + new results without duplicates (by videoId)
         # ------------------------------------------------------------
         combined_by_id = {}
 
+        # Existing first, then new overwrites if same ID
         for item in existing_items:
             vid = item.get("videoId")
             if vid:
@@ -184,16 +224,19 @@ class ASMRFetcher:
         with open(self.json_output, "w", encoding="utf-8") as f:
             json.dump(combined_items, f, indent=4, ensure_ascii=False)
 
-        # Update seen IDs file
+        # ------------------------------------------------------------
+        # Update seen IDs file in a STABLE order
+        # (existing order preserved, new IDs appended at end)
+        # ------------------------------------------------------------
         with open(self.seen_file, "w", encoding="utf-8") as f:
-            for vid in seen_ids:
+            for vid in seen_ids_list:
                 f.write(vid + "\n")
 
         self.logger.info(
             f"Saved {len(new_items)} new entries to '{self.json_output}'. "
             f"Total entries stored: {len(combined_items)}"
         )
-        self.logger.info(f"Total unique ASMR videos tracked: {len(seen_ids)}")
+        self.logger.info(f"Total unique ASMR videos tracked: {len(seen_ids_list)}")
 
         return new_items
 
@@ -205,7 +248,14 @@ secret = SimpleNamespace(
     API=common.get_secrets("google-api-key")
 )
 
-fetcher = ASMRFetcher(api_key=secret.API,
-                      seen_file=os.path.join(common.get_configs("data"), "seen_video_ids.txt"),
-                      json_output=os.path.join(common.get_configs("data"), "asmr_results.json"))
-fetcher.fetch_asmr_videos()
+fetcher = ASMRFetcher(
+    api_key=secret.API,
+    query="ASMR",
+    max_pages=100,                # increase if you want up to more pages
+    results_per_page=50,          # YouTube API max
+    seen_file="seen_video_ids.txt",
+    json_output="asmr_results.json"
+)
+
+if __name__ == "__main__":
+    fetcher.fetch_asmr_videos()
