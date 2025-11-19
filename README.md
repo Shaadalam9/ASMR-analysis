@@ -97,3 +97,22 @@ source .venv/bin/activate
 ```command line
 python3 analysis.py
 ```
+
+### Configuration of project
+Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used. The config file has the following parameters:
+- **`data`**: Path to the directory containing the project’s data files.
+- **`query`**: The search query string used to discover videos (e.g., "ASMR", "ASMR roleplay", etc.).
+- **`font_family`**: Specifies the font family to be used in outputs.
+- **`font_size`**: Specifies the font size to be used in outputs.
+- **`plotly_template`**: Defines the template for Plotly figures.
+- **`logger_level`**: Level of console output. Can be: debug, info, warning, error.
+
+### Results
+[![Word cloud of ASMR video titles](figures/wordcloud_titles.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_titles.html)  
+Word cloud of ASMR video titles, generated from the collected dataset. More frequent terms appear larger, highlighting common themes and patterns in ASMR content.
+
+[![Word cloud of ASMR video descriptions](figures/wordcloud_descriptions.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_descriptions.html)  
+Word cloud of ASMR video descriptions, showing the most frequent terms used in the textual descriptions accompanying ASMR videos. This highlights how creators describe, contextualize, and promote their content.
+
+[![Word cloud of ASMR video titles and descriptions](figures/wordcloud_titles_descriptions.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_titles_descriptions.html)  
+Combined word cloud of ASMR video titles and descriptions, offering a holistic view of the most frequent terms across both fields. The visualization summarizes the overarching themes and stylistic patterns in the dataset.
