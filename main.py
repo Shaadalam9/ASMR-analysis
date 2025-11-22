@@ -21,7 +21,7 @@ Key features:
         - description
         - uploadDate
         - language
-    * Adds channel-level metric:
+    * Adds channel-level metric (when API is available):
         - channel_average_views (average views per video on that channel)
     * Ensures relevance by requiring the (case-insensitive) query keyword
       to appear in title/description.
@@ -54,12 +54,14 @@ Language detection:
 Channel average views:
     * Uses YouTube Data API `channels().list(part="statistics")`:
         - statistics.viewCount / statistics.videoCount
+    * Caches per-channel results in memory (one API call per channel per run).
+    * Stops calling the channels API once quota is exceeded for this run.
 
 Example:
     To run as a script, ensure your configs and secrets are set up,
     then:
 
-        python asmr_fetcher.py
+        python main.py
 
 Author:
     Shadab Alam <shaadalam.5u@gmail.com>
@@ -72,10 +74,12 @@ import os
 import re
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
+
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
 from pytubefix import YouTube
 from pytubefix.contrib.search import Filter, Search
+
 from logmod import logs
 import common
 from custom_logger import CustomLogger
@@ -87,7 +91,7 @@ DetectorFactory.seed = 0
 class ASMRFetcher:
     """Fetch, enrich, and persist query-related videos from YouTube.
 
-    Despite the name, this class can fetch videos for *any* query, such as
+    Despite the name, this class can fetch videos for any query, such as
     "ASMR", "Drive", etc. It discovers videos via:
 
     1. YouTube Data API (if an API key is provided).
@@ -142,6 +146,8 @@ class ASMRFetcher:
         youtube: YouTube Data API client or None if no API key is set.
         logger: Custom logger instance for structured logging.
         _channel_stats_cache: In-memory cache for channel statistics lookups.
+        _channel_stats_quota_exceeded: Flag set to True once quotaExceeded
+            is encountered on channel stats.
     """
 
     def __init__(
@@ -201,8 +207,11 @@ class ASMRFetcher:
             self.logger.info("No API key provided. Using only pytubefix Search for discovery.")
 
         # Simple in-memory cache to avoid repeated channel stats calls.
-        # Key: channel_id, Value: channel_average_views (float or None)
+        # Key: channel_id, Value: channel_average_views (float or None).
         self._channel_stats_cache: Dict[str, Optional[float]] = {}
+
+        # Flag to stop calling channel stats once quota is exceeded in this run.
+        self._channel_stats_quota_exceeded: bool = False
 
     # -------------------------------------------------------------------------
     # Duration helpers
@@ -259,7 +268,7 @@ class ASMRFetcher:
             seconds = int(match.group(4) or 0)
             return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
 
-        self.logger.warning(f"Could not parse duration: {iso_duration}")
+        self.logger.warning("Could not parse duration string; using 0 seconds")
         return 0
 
     def _is_short_video(self, seconds: int) -> bool:
@@ -337,7 +346,7 @@ class ASMRFetcher:
             if isinstance(val, (datetime.date, datetime.datetime)):
                 return val.isoformat()
         except Exception:
-            # If anything goes wrong, fall back to generic conversion.
+            # Fall back to generic conversion.
             pass
 
         try:
@@ -351,8 +360,8 @@ class ASMRFetcher:
     def _detect_language(self, text: str) -> Optional[str]:
         """Detect the language of the given text.
 
-        This uses the `langdetect` library to infer the language code from
-        free-form text (e.g. title + description).
+        Uses the `langdetect` library to infer the language code from free-form
+        text (e.g. title + description).
 
         Args:
             text: Input text used for language detection.
@@ -380,19 +389,24 @@ class ASMRFetcher:
 
             channel_average_views = viewCount / videoCount
 
-        Results are cached in-memory per channel ID to avoid repeated API calls.
+        Results are cached in-memory per channel ID to avoid repeated API calls
+        during a single run.
 
         Args:
             channel_id: The YouTube channel ID.
 
         Returns:
             Average views per video as a float, or None if unavailable or
-            if the YouTube API client is not configured.
+            if the YouTube API client is not configured or quota is exceeded.
         """
         if not channel_id:
             return None
 
-        # Return from cache if present.
+        # If we've already decided not to call the API anymore this run, bail out.
+        if self._channel_stats_quota_exceeded:
+            return None
+
+        # Return from cache if present (even if cached None).
         if channel_id in self._channel_stats_cache:
             return self._channel_stats_cache[channel_id]
 
@@ -421,13 +435,25 @@ class ASMRFetcher:
             else:
                 avg = total_views / float(total_videos)
 
+            # Cache result (including None) so we do not refetch this run.
             self._channel_stats_cache[channel_id] = avg
             return avg
 
         except Exception as exc:  # noqa: BLE001
+            # Do NOT put exc string into the format message (it contains braces).
             self.logger.warning(
-                f"Failed to fetch channel stats for {channel_id}: {exc}"
+                "Failed to fetch channel statistics; channel_average_views will be None for this channel"
             )
+
+            # If this looks like a quotaExceeded error, remember it so we
+            # do not hammer the API with more failing requests this run.
+            if "quotaExceeded" in str(exc):
+                self._channel_stats_quota_exceeded = True
+                self.logger.warning(
+                    "YouTube channel statistics quota exceeded; "
+                    "channel_average_views will be skipped for the rest of this run"
+                )
+
             self._channel_stats_cache[channel_id] = None
             return None
 
@@ -460,14 +486,14 @@ class ASMRFetcher:
             In case of a network or parsing error, the function logs a warning
             and returns a dict with default values.
         """
-        url = f"https://www.youtube.com/watch?v={video_id}"
+        url = "https://www.youtube.com/watch?v=" + video_id
 
         try:
             yt = YouTube(url)
-        except Exception as exc:  # noqa: BLE001
+        except Exception:  # noqa: BLE001
             # Total failure to construct the YouTube object.
             self.logger.warning(
-                f"Failed to fetch pytubefix metadata for {video_id}: {exc}"
+                "Failed to fetch pytubefix metadata; using default values for this video"
             )
             return {
                 "title": None,
@@ -498,7 +524,7 @@ class ASMRFetcher:
         upload_date = self._normalize_upload_date(publish_raw)
 
         # Try to detect language from title + description.
-        combined_text = f"{title or ''} {description or ''}"
+        combined_text = (title or "") + " " + (description or "")
         language = self._detect_language(combined_text)
 
         # We do NOT compute channel_average_views here; that is done via API later.
@@ -546,9 +572,10 @@ class ASMRFetcher:
             return False
 
         needs_fetch = any(
-            (field not in meta or _is_missing(meta.get(field)))
+            (field not in meta) or _is_missing(meta.get(field))
             for field in required_fields
         )
+
         if needs_fetch:
             # Re-fetch from pytubefix if any of the core fields are missing.
             extra = self._fetch_video_metadata_pytubefix(video_id)
@@ -556,22 +583,21 @@ class ASMRFetcher:
                 if field not in meta or _is_missing(meta.get(field)):
                     meta[field] = extra.get(field)
 
-            # Only overwrite language with pytubefix-derived language if we don't have one yet.
+            # Only overwrite language with pytubefix-derived language if we do not have one yet.
             if not meta.get("language"):
                 meta["language"] = extra.get("language")
 
         # Language fallback: detect from title + description if still missing.
         if not meta.get("language"):
-            combined_text = f"{meta.get('title', '')} {meta.get('description', '')}"
+            combined_text = (meta.get("title", "") or "") + " " + (meta.get("description", "") or "")
             meta["language"] = self._detect_language(combined_text)
 
         # Channel average views: compute via YouTube Data API if missing and channelId is known.
-        if meta.get("channel_average_views") is None:
+        # We only do this when the field is None or absent, so existing values are never overwritten.
+        if ("channel_average_views" not in meta) or (meta.get("channel_average_views") is None):
             channel_id = meta.get("channelId")
             if channel_id:
-                meta["channel_average_views"] = self._fetch_channel_average_views(
-                    channel_id
-                )
+                meta["channel_average_views"] = self._fetch_channel_average_views(channel_id)
 
     # -------------------------------------------------------------------------
     # Keyword relevance helper
@@ -599,7 +625,8 @@ class ASMRFetcher:
             # If no keyword is set, skip filtering.
             return True
 
-        blob = f"{title or ''} {description or ''}".lower()
+        blob = (title or "") + " " + (description or "")
+        blob = blob.lower()
         return self.query_keyword in blob
 
     # -------------------------------------------------------------------------
@@ -619,7 +646,9 @@ class ASMRFetcher:
                 New IDs discovered in this method are appended.
 
         Returns:
-            A list of newly discovered video metadata dictionaries.
+            A list of newly discovered video metadata dictionaries. If the
+            quota is exceeded or the API call fails, an empty list is returned
+            and the method logs a warning, but does not raise.
         """
         if self.youtube is None:
             return []
@@ -628,16 +657,26 @@ class ASMRFetcher:
         next_page_token: Optional[str] = None
 
         for _ in range(self.max_pages):
-            # Search request for videos matching the query.
-            request = self.youtube.search().list(  # type: ignore[call-arg]
-                q=self.query,
-                part="snippet",
-                type="video",
-                maxResults=self.results_per_page,
-                pageToken=next_page_token,
-                order="date",
-            )
-            response = request.execute()
+            try:
+                request = self.youtube.search().list(  # type: ignore[call-arg]
+                    q=self.query,
+                    part="snippet",
+                    type="video",
+                    maxResults=self.results_per_page,
+                    pageToken=next_page_token,
+                    order="date",
+                )
+                response = request.execute()
+            except Exception as exc:  # noqa: BLE001
+                # We do not include exc text as it contains braces.
+                self.logger.warning(
+                    "YouTube Data API search failed; falling back to pytubefix only for this run"
+                )
+                if "quotaExceeded" in str(exc):
+                    self.logger.warning(
+                        "YouTube search quota exceeded; skipping further API search calls this run"
+                    )
+                return []
 
             for item in response.get("items", []):
                 video_id = item["id"]["videoId"]
@@ -655,10 +694,14 @@ class ASMRFetcher:
                     continue
 
                 # Fetch duration details from YouTube Data API.
-                details = self.youtube.videos().list(  # type: ignore[call-arg]
-                    part="contentDetails,snippet",
-                    id=video_id,
-                ).execute()
+                try:
+                    details = self.youtube.videos().list(  # type: ignore[call-arg]
+                        part="contentDetails",
+                        id=video_id,
+                    ).execute()
+                except Exception:
+                    # If duration fetch fails, skip this video.
+                    continue
 
                 if not details.get("items"):
                     continue
@@ -690,13 +733,12 @@ class ASMRFetcher:
                 meta_language = meta.get("language")
                 final_language = default_lang or meta_language
 
-                # Channel average views via stats endpoint.
+                # Channel average views via stats endpoint (safe, cached).
                 channel_id = meta.get("channelId")
-                channel_avg_views = (
-                    self._fetch_channel_average_views(channel_id)
-                    if channel_id
-                    else None
-                )
+                if channel_id:
+                    channel_avg_views = self._fetch_channel_average_views(channel_id)
+                else:
+                    channel_avg_views = None
 
                 # Mark as seen and collect.
                 seen_ids_list.append(video_id)
@@ -722,7 +764,9 @@ class ASMRFetcher:
             if not next_page_token:
                 break
 
-        self.logger.info(f"[API] Found {len(new_items)} new non-short relevant videos.")
+        self.logger.info(
+            "[API] Found {} new non-short relevant videos.".format(len(new_items))
+        )
         return new_items
 
     # -------------------------------------------------------------------------
@@ -767,7 +811,7 @@ class ASMRFetcher:
             # Extract video ID from search result object or URL.
             video_id = getattr(v, "video_id", None) or getattr(v, "videoId", None)
             if not video_id:
-                watch_url = getattr(v, "watch_url", "")
+                watch_url = getattr(v, "watch_url", "") or ""
                 match = re.search(r"v=([0-9A-Za-z_-]{11})", watch_url)
                 video_id = match.group(1) if match else None
 
@@ -794,19 +838,18 @@ class ASMRFetcher:
                 continue
 
             # Relevance check; prefer title from either search or metadata.
-            effective_title = title or meta.get("title", "")
+            effective_title = title or meta.get("title", "") or ""
             if not self._contains_query_keyword(
                 effective_title, meta.get("description") or ""
             ):
                 continue
 
-            # Channel average views via API, if possible.
+            # Channel average views via API, if possible (cached).
             channel_id = meta.get("channelId")
-            channel_avg_views = (
-                self._fetch_channel_average_views(channel_id)
-                if channel_id
-                else None
-            )
+            if channel_id:
+                channel_avg_views = self._fetch_channel_average_views(channel_id)
+            else:
+                channel_avg_views = None
 
             # Mark as seen and collect.
             seen_ids_list.append(video_id)
@@ -829,7 +872,9 @@ class ASMRFetcher:
             )
 
         self.logger.info(
-            f"[pytubefix Search] Found {len(new_items)} new non-short relevant videos.",
+            "[pytubefix Search] Found {} new non-short relevant videos.".format(
+                len(new_items)
+            )
         )
         return new_items
 
@@ -868,22 +913,18 @@ class ASMRFetcher:
             with open(self.json_output, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError, TypeError):
-            self.logger.warning(
-                f"Existing JSON '{self.json_output}' could not be parsed; starting fresh."
-            )
+            self.logger.warning("Existing JSON could not be parsed; starting fresh")
             return {}
 
         if not isinstance(data, dict):
-            self.logger.warning(
-                f"Existing JSON '{self.json_output}' is not a dict; starting fresh."
-            )
+            self.logger.warning("Existing JSON is not a dict; starting fresh")
             return {}
 
         existing_by_id: Dict[str, Dict[str, Any]] = {}
         for vid, meta in data.items():
             if not isinstance(meta, dict):
                 meta = {}
-            existing_by_id[vid] = meta
+            existing_by_id[str(vid)] = meta
 
         return existing_by_id
 
@@ -900,12 +941,12 @@ class ASMRFetcher:
             1. Loading existing video metadata and seen IDs.
             2. Discovering new videos via the YouTube Data API (if enabled).
             3. Discovering additional videos via pytubefix Search.
-            4. Merging metadata, ensuring completeness via pytubefix.
+            4. Ensuring metadata completeness **only for newly added videos**.
             5. Writing a unified JSON file keyed by videoId.
             6. Updating the `seen_video_ids.txt` file.
 
         Returns:
-            A list of newly added *unique* video IDs for this run.
+            A list of newly added unique video IDs for this run.
         """
         # 1) Load existing videos and treat them as already known.
         existing_by_id = self._load_existing_by_id()
@@ -940,7 +981,9 @@ class ASMRFetcher:
         all_new_items.extend(pytube_items)
 
         self.logger.info(
-            f"Total (raw) new non-short relevant videos discovered this run: {len(all_new_items)}"
+            "Total new non-short relevant videos discovered this run: {}".format(
+                len(all_new_items)
+            )
         )
 
         # 5) Merge existing + newly discovered, keyed by videoId.
@@ -963,29 +1006,32 @@ class ASMRFetcher:
                 meta[key] = value
             combined_by_id[vid] = meta
 
-        # 6) Ensure metadata completeness for all videos via pytubefix and language/channel stats.
-        for vid, meta in combined_by_id.items():
-            self._ensure_metadata_for_item(vid, meta)
-
-        # 7) Determine how many video IDs are truly new compared to the original JSON.
+        # 6) Ensure metadata completeness **only for newly added videos**.
         final_keys = set(combined_by_id.keys())
         unique_new_ids = final_keys - existing_keys
-        num_unique_new = len(unique_new_ids)
+        self.logger.info(
+            "Ensuring metadata for {} newly added videos".format(len(unique_new_ids))
+        )
 
-        # 8) Save merged results back to JSON in the unified format.
+        for vid in unique_new_ids:
+            self._ensure_metadata_for_item(vid, combined_by_id[vid])
+
+        # 7) Save merged results back to JSON in the unified format.
         with open(self.json_output, "w", encoding="utf-8") as f:
             json.dump(combined_by_id, f, indent=4, ensure_ascii=False)
 
-        # 9) Update seen IDs file with a stable order.
+        # 8) Update seen IDs file with a stable order.
         with open(self.seen_file, "w", encoding="utf-8") as f:
             for vid in seen_ids_list:
                 f.write(vid + "\n")
 
         self.logger.info(
-            f"Saved {num_unique_new} unique new entries to '{self.json_output}'. Total entries stored: {len(combined_by_id)}"  # noqa: E501
+            "Saved {} unique new entries to '{}'. Total entries stored: {}".format(
+                len(unique_new_ids), self.json_output, len(combined_by_id)
+            )
         )
         self.logger.info(
-            f"Total unique videos tracked (seen list size): {len(seen_ids_list)}"
+            "Total unique videos tracked (seen list size): {}".format(len(seen_ids_list))
         )
 
         return list(unique_new_ids)
@@ -1006,7 +1052,6 @@ fetcher = ASMRFetcher(
     seen_file="seen_video_ids.txt",
     json_output="asmr_results.json",
 )
-
 
 if __name__ == "__main__":
     fetcher.fetch_asmr_videos()
