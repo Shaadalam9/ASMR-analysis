@@ -483,17 +483,18 @@ class ASMRFetcher:
                 - "language" (str or None, auto-detected from text)
                 - "channel_average_views" (None here; filled later if API is available)
 
-            In case of a network or parsing error, the function logs a warning
-            and returns a dict with default values.
+            In case of a network, availability, or parsing error (including live
+            streams), the function logs a warning and returns a dict with default
+            values.
         """
         url = "https://www.youtube.com/watch?v=" + video_id
 
+        # First, try to construct the YouTube object at all.
         try:
             yt = YouTube(url)
-        except Exception:  # noqa: BLE001
-            # Total failure to construct the YouTube object.
+        except Exception:
             self.logger.warning(
-                "Failed to fetch pytubefix metadata; using default values for this video"
+                "Failed to construct pytubefix YouTube object; using default metadata for this video"
             )
             return {
                 "title": None,
@@ -508,38 +509,63 @@ class ASMRFetcher:
                 "channel_average_views": None,
             }
 
-        # From here on, we do NOT raise; we only fall back to safe defaults.
-        title = getattr(yt, "title", None)
-        channel_id = getattr(yt, "channel_id", None)
-        author = getattr(yt, "author", None)
-        views_raw = getattr(yt, "views", None)
-        likes_raw = getattr(yt, "likes", None)
-        description = getattr(yt, "description", None)
-        length_raw = getattr(yt, "length", None)
-        publish_raw = getattr(yt, "publish_date", None)
+        # Now, be defensive when accessing properties (length can raise LiveStreamError).
+        try:
+            title = getattr(yt, "title", None)
+            channel_id = getattr(yt, "channel_id", None)
+            author = getattr(yt, "author", None)
+            views_raw = getattr(yt, "views", None)
+            likes_raw = getattr(yt, "likes", None)
+            description = getattr(yt, "description", None)
 
-        duration = self._safe_int_or_zero(length_raw)
-        views = self._normalize_int(views_raw)
-        likes = self._normalize_int(likes_raw)
-        upload_date = self._normalize_upload_date(publish_raw)
+            try:
+                length_raw = getattr(yt, "length", None)
+            except Exception:
+                # Live streams and some restricted videos can fail here.
+                length_raw = None
 
-        # Try to detect language from title + description.
-        combined_text = (title or "") + " " + (description or "")
-        language = self._detect_language(combined_text)
+            publish_raw = getattr(yt, "publish_date", None)
 
-        # We do NOT compute channel_average_views here; that is done via API later.
-        return {
-            "title": title,
-            "duration": duration,
-            "channelId": channel_id,
-            "author": author,
-            "views": views,
-            "likes": likes,
-            "description": description,
-            "uploadDate": upload_date,
-            "language": language,
-            "channel_average_views": None,
-        }
+            duration = self._safe_int_or_zero(length_raw)
+            views = self._normalize_int(views_raw)
+            likes = self._normalize_int(likes_raw)
+            upload_date = self._normalize_upload_date(publish_raw)
+
+            # Try to detect language from title + description.
+            combined_text = (title or "") + " " + (description or "")
+            language = self._detect_language(combined_text)
+
+            return {
+                "title": title,
+                "duration": duration,
+                "channelId": channel_id,
+                "author": author,
+                "views": views,
+                "likes": likes,
+                "description": description,
+                "uploadDate": upload_date,
+                "language": language,
+                "channel_average_views": None,
+            }
+
+        except Exception:
+            # Catch-all: if any property access blows up (e.g. weird edge cases),
+            # we don't want the whole pipeline to die for a single video.
+            self.logger.warning(
+                "Failed to extract pytubefix metadata; using default metadata for this video"
+            )
+            return {
+                "title": None,
+                "duration": 0,
+                "channelId": None,
+                "author": None,
+                "views": None,
+                "likes": None,
+                "description": None,
+                "uploadDate": None,
+                "language": None,
+                "channel_average_views": None,
+            }
 
     def _ensure_metadata_for_item(self, video_id: str, meta: Dict[str, Any]) -> None:
         """Ensure that a video metadata dictionary is fully populated.

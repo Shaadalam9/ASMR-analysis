@@ -478,12 +478,10 @@ class JSONMetadataEnricher:
         for idx, (video_id, meta) in enumerate(data.items(), start=1):
             try:
                 self._enrich_single_video(video_id, meta)
-            except Exception as exc:  # noqa: BLE001
+            except Exception as exc:  # noqa: F841
                 self.logger.warning(
-                    "Failed to enrich video {} at index {}; skipping this video".format(
-                        video_id, idx
+                    f"Failed to enrich video {video_id} at index {idx}; skipping this video."
                     )
-                )
 
             if idx % 50 == 0 or idx == total:
                 self.logger.info("Progress: {} / {} videos enriched.".format(idx, total))
@@ -510,7 +508,7 @@ if __name__ == "__main__":
     json_path = os.path.join(data_folder, json_filename)
 
     enricher = JSONMetadataEnricher(
-        api_key=secret_api,
+        api_key=secret_api,  # type: ignore
         json_path=json_path,
     )
     enricher.enrich_json()
