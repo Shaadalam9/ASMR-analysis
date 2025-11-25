@@ -77,7 +77,7 @@ from typing import Any, Dict, List, Optional
 
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
-from pytubefix import YouTube
+from pytubefix import YouTube, exceptions as pytube_exceptions
 from pytubefix.contrib.search import Filter, Search
 
 from logmod import logs
@@ -148,6 +148,8 @@ class ASMRFetcher:
         _channel_stats_cache: In-memory cache for channel statistics lookups.
         _channel_stats_quota_exceeded: Flag set to True once quotaExceeded
             is encountered on channel stats.
+        _pytube_disabled: Flag set to True when pytubefix hits BotDetection
+            or similar fatal conditions; disables further pytubefix use this run.
     """
 
     def __init__(
@@ -159,25 +161,7 @@ class ASMRFetcher:
         seen_file: str = "seen_video_ids.txt",
         json_output: str = "asmr_results.json",
     ) -> None:
-        """Initialize ASMRFetcher.
-
-        Args:
-            api_key: YouTube API key. If None or empty, only pytubefix
-                contrib Search is used for discovery.
-            query: Search query string used for discovery. This keyword will
-                be used for case-insensitive matching in title/description.
-            max_pages: Maximum number of pages to fetch in YouTube Data API
-                results and also used as a soft cap for pytubefix Search.
-            results_per_page: Number of search results per page in the YouTube
-                Data API. YouTube usually caps this at 50.
-            seen_file: File name (inside the configured data folder) storing
-                previously seen video IDs, one per line.
-            json_output: File name (inside the configured data folder) storing
-                the JSON results.
-
-        Raises:
-            KeyError: If `common.get_configs("data")` is missing or misconfigured.
-        """
+        """Initialize ASMRFetcher."""
         self.api_key = api_key or None
         self.query = query
         # Use a simple, lowercased keyword for relevance matching.
@@ -200,7 +184,13 @@ class ASMRFetcher:
 
         # Initialize YouTube API client only if an API key is given.
         if self.api_key:
-            self.youtube = build("youtube", "v3", developerKey=self.api_key)
+            # cache_discovery=False silences the oauth2client<4.0 warning.
+            self.youtube = build(
+                "youtube",
+                "v3",
+                developerKey=self.api_key,
+                cache_discovery=False,
+            )
             self.logger.info("YouTube Data API enabled (API key provided).")
         else:
             self.youtube = None
@@ -213,26 +203,32 @@ class ASMRFetcher:
         # Flag to stop calling channel stats once quota is exceeded in this run.
         self._channel_stats_quota_exceeded: bool = False
 
+        # Flag to stop using pytubefix once BotDetection occurs for this run.
+        self._pytube_disabled: bool = False
+
+    # -------------------------------------------------------------------------
+    # Small helpers
+    # -------------------------------------------------------------------------
+    def _empty_video_metadata(self) -> Dict[str, Any]:
+        """Return an empty/default metadata dict for a video."""
+        return {
+            "title": None,
+            "duration": 0,
+            "channelId": None,
+            "author": None,
+            "views": None,
+            "likes": None,
+            "description": None,
+            "uploadDate": None,
+            "language": None,
+            "channel_average_views": None,
+        }
+
     # -------------------------------------------------------------------------
     # Duration helpers
     # -------------------------------------------------------------------------
     def _duration_to_seconds(self, iso_duration: str) -> int:
-        """Convert an ISO 8601 YouTube duration string to total seconds.
-
-        This helper interprets common YouTube duration formats such as:
-          * "PT1H2M10S"
-          * "PT15S"
-          * "PT1M"
-          * "P0D" (special case for zero seconds)
-
-        Args:
-            iso_duration: ISO 8601 duration string as returned by the YouTube
-                Data API in video `contentDetails.duration`.
-
-        Returns:
-            Total number of seconds represented by the duration. If the duration
-            cannot be parsed, 0 is returned and a warning is logged.
-        """
+        """Convert an ISO 8601 YouTube duration string to total seconds."""
         if iso_duration == "P0D":
             return 0
 
@@ -272,29 +268,14 @@ class ASMRFetcher:
         return 0
 
     def _is_short_video(self, seconds: int) -> bool:
-        """Determine whether a video should be considered a YouTube Short.
-
-        Args:
-            seconds: Duration of the video in seconds.
-
-        Returns:
-            True if `seconds` is strictly less than 60, indicating a short video.
-        """
+        """Determine whether a video should be considered a YouTube Short."""
         return seconds < 60
 
     # -------------------------------------------------------------------------
     # Metadata normalization helpers
     # -------------------------------------------------------------------------
     def _normalize_int(self, val: Any) -> Any:
-        """Normalize numeric fields (views/likes) to integers when possible.
-
-        Args:
-            val: Value to normalize, possibly int, float, or string.
-
-        Returns:
-            Integer if the value can be safely converted; otherwise the original
-            value (unchanged).
-        """
+        """Normalize numeric fields (views/likes) to integers when possible."""
         if isinstance(val, int):
             return val
         if isinstance(val, float):
@@ -305,16 +286,7 @@ class ASMRFetcher:
         return val
 
     def _safe_int_or_zero(self, val: Any) -> int:
-        """Convert a value to int if reasonable, otherwise return 0.
-
-        Intended for duration-like fields where failure should not raise.
-
-        Args:
-            val: Value that may represent an integer.
-
-        Returns:
-            Parsed integer value, or 0 if parsing is not possible.
-        """
+        """Convert a value to int if reasonable, otherwise return 0."""
         if isinstance(val, int):
             return val
         if isinstance(val, float):
@@ -325,18 +297,7 @@ class ASMRFetcher:
         return 0
 
     def _normalize_upload_date(self, val: Any) -> Optional[str]:
-        """Normalize upload date to a string, if possible.
-
-        This method accepts common date-like values (e.g. datetime.date,
-        datetime.datetime, string) and returns an ISO-formatted string when
-        possible.
-
-        Args:
-            val: Raw upload date value.
-
-        Returns:
-            Normalized upload date string or None if not available.
-        """
+        """Normalize upload date to a string, if possible."""
         if val is None:
             return None
 
@@ -358,18 +319,7 @@ class ASMRFetcher:
     # Language detection helper
     # -------------------------------------------------------------------------
     def _detect_language(self, text: str) -> Optional[str]:
-        """Detect the language of the given text.
-
-        Uses the `langdetect` library to infer the language code from free-form
-        text (e.g. title + description).
-
-        Args:
-            text: Input text used for language detection.
-
-        Returns:
-            BCP-47-like language code (e.g. "en", "fr", "de") if detection
-            succeeds; otherwise None.
-        """
+        """Detect the language of the given text using langdetect."""
         text = (text or "").strip()
         if not text:
             return None
@@ -383,22 +333,7 @@ class ASMRFetcher:
     # Channel statistics helper
     # -------------------------------------------------------------------------
     def _fetch_channel_average_views(self, channel_id: str) -> Optional[float]:
-        """Fetch average views per video for a given channel using the YouTube Data API.
-
-        This method queries the channel statistics and computes:
-
-            channel_average_views = viewCount / videoCount
-
-        Results are cached in-memory per channel ID to avoid repeated API calls
-        during a single run.
-
-        Args:
-            channel_id: The YouTube channel ID.
-
-        Returns:
-            Average views per video as a float, or None if unavailable or
-            if the YouTube API client is not configured or quota is exceeded.
-        """
+        """Fetch average views per video for a given channel using the YouTube Data API."""
         if not channel_id:
             return None
 
@@ -440,7 +375,7 @@ class ASMRFetcher:
             return avg
 
         except Exception as exc:  # noqa: BLE001
-            # Do NOT put exc string into the format message (it contains braces).
+            # Do NOT put exc string into the format message (it may contain braces).
             self.logger.warning(
                 "Failed to fetch channel statistics; channel_average_views will be None for this channel"
             )
@@ -461,55 +396,31 @@ class ASMRFetcher:
     # pytubefix metadata helpers
     # -------------------------------------------------------------------------
     def _fetch_video_metadata_pytubefix(self, video_id: str) -> Dict[str, Any]:
-        """Fetch basic video metadata via pytubefix.
+        """Fetch basic video metadata via pytubefix (defensive, BotDetection-aware)."""
+        if self._pytube_disabled:
+            # We already hit BotDetection previously; don't try again this run.
+            return self._empty_video_metadata()
 
-        This method uses pytubefix's `YouTube` class to load metadata for a single
-        video and returns a dictionary of fields that are useful for analytics
-        and enrichment.
-
-        Args:
-            video_id: YouTube video ID (11-character string).
-
-        Returns:
-            A dictionary with the following keys:
-                - "title" (str or None)
-                - "duration" (int, seconds; 0 if unavailable)
-                - "channelId" (str or None)
-                - "author" (str or None)
-                - "views" (int or original type if conversion fails)
-                - "likes" (int or original type if conversion fails)
-                - "description" (str or None)
-                - "uploadDate" (str or None)
-                - "language" (str or None, auto-detected from text)
-                - "channel_average_views" (None here; filled later if API is available)
-
-            In case of a network, availability, or parsing error (including live
-            streams), the function logs a warning and returns a dict with default
-            values.
-        """
         url = "https://www.youtube.com/watch?v=" + video_id
 
         # First, try to construct the YouTube object at all.
         try:
-            yt = YouTube(url)
+            # Use "WEB" client to leverage PoToken and reduce bot detection.
+            yt = YouTube(url, "WEB")
+        except pytube_exceptions.BotDetection:
+            self.logger.warning(
+                "pytubefix BotDetection when constructing YouTube object; "
+                "disabling pytubefix for the rest of this run"
+            )
+            self._pytube_disabled = True
+            return self._empty_video_metadata()
         except Exception:
             self.logger.warning(
                 "Failed to construct pytubefix YouTube object; using default metadata for this video"
             )
-            return {
-                "title": None,
-                "duration": 0,
-                "channelId": None,
-                "author": None,
-                "views": None,
-                "likes": None,
-                "description": None,
-                "uploadDate": None,
-                "language": None,
-                "channel_average_views": None,
-            }
+            return self._empty_video_metadata()
 
-        # Now, be defensive when accessing properties (length can raise LiveStreamError).
+        # Now, be defensive when accessing properties (length can raise LiveStreamError, etc.).
         try:
             title = getattr(yt, "title", None)
             channel_id = getattr(yt, "channel_id", None)
@@ -548,37 +459,23 @@ class ASMRFetcher:
                 "channel_average_views": None,
             }
 
+        except pytube_exceptions.BotDetection:
+            self.logger.warning(
+                "pytubefix BotDetection when extracting metadata; "
+                "disabling pytubefix for the rest of this run"
+            )
+            self._pytube_disabled = True
+            return self._empty_video_metadata()
         except Exception:
             # Catch-all: if any property access blows up (e.g. weird edge cases),
             # we don't want the whole pipeline to die for a single video.
             self.logger.warning(
                 "Failed to extract pytubefix metadata; using default metadata for this video"
             )
-            return {
-                "title": None,
-                "duration": 0,
-                "channelId": None,
-                "author": None,
-                "views": None,
-                "likes": None,
-                "description": None,
-                "uploadDate": None,
-                "language": None,
-                "channel_average_views": None,
-            }
+            return self._empty_video_metadata()
 
     def _ensure_metadata_for_item(self, video_id: str, meta: Dict[str, Any]) -> None:
-        """Ensure that a video metadata dictionary is fully populated.
-
-        This method inspects the current metadata for a given video and fills in
-        any missing or empty fields using pytubefix. Language is handled with
-        a separate lightweight detection step. Channel average views are
-        computed via the YouTube Data API if possible.
-
-        Args:
-            video_id: Video ID corresponding to `meta`.
-            meta: Metadata dictionary for the video. It is modified in-place.
-        """
+        """Ensure that a video metadata dictionary is fully populated."""
         required_fields = [
             "title",
             "duration",
@@ -602,7 +499,7 @@ class ASMRFetcher:
             for field in required_fields
         )
 
-        if needs_fetch:
+        if needs_fetch and not self._pytube_disabled:
             # Re-fetch from pytubefix if any of the core fields are missing.
             extra = self._fetch_video_metadata_pytubefix(video_id)
             for field in required_fields:
@@ -619,7 +516,6 @@ class ASMRFetcher:
             meta["language"] = self._detect_language(combined_text)
 
         # Channel average views: compute via YouTube Data API if missing and channelId is known.
-        # We only do this when the field is None or absent, so existing values are never overwritten.
         if ("channel_average_views" not in meta) or (meta.get("channel_average_views") is None):
             channel_id = meta.get("channelId")
             if channel_id:
@@ -629,24 +525,7 @@ class ASMRFetcher:
     # Keyword relevance helper
     # -------------------------------------------------------------------------
     def _contains_query_keyword(self, title: str, description: str = "") -> bool:
-        """Check if video content appears relevant based on the query keyword.
-
-        The check is case-insensitive and uses a simple substring search
-        over the concatenation of title and description.
-
-        Example:
-            If query="ASMR", this matches "asmr", "ASMR", "Asmr", etc.
-            If query="Drive", this matches "drive", "Drive", "DRIVE", etc.
-
-        Args:
-            title: Video title.
-            description: Video description.
-
-        Returns:
-            True if the lowercased query keyword is found in either the title
-            or description; False otherwise. If `query_keyword` is empty,
-            this returns True (no filtering).
-        """
+        """Check if video content appears relevant based on the query keyword."""
         if not self.query_keyword:
             # If no keyword is set, skip filtering.
             return True
@@ -663,19 +542,7 @@ class ASMRFetcher:
         seen_ids_set: set[str],
         seen_ids_list: List[str],
     ) -> List[Dict[str, Any]]:
-        """Discover new relevant videos using the YouTube Data API.
-
-        Args:
-            seen_ids_set: A set of already seen video IDs. This set is used to
-                avoid processing duplicates and is modified in-place.
-            seen_ids_list: A list of seen video IDs preserving insertion order.
-                New IDs discovered in this method are appended.
-
-        Returns:
-            A list of newly discovered video metadata dictionaries. If the
-            quota is exceeded or the API call fails, an empty list is returned
-            and the method logs a warning, but does not raise.
-        """
+        """Discover new relevant videos using the YouTube Data API."""
         if self.youtube is None:
             return []
 
@@ -694,7 +561,6 @@ class ASMRFetcher:
                 )
                 response = request.execute()
             except Exception as exc:  # noqa: BLE001
-                # We do not include exc text as it contains braces.
                 self.logger.warning(
                     "YouTube Data API search failed; falling back to pytubefix only for this run"
                 )
@@ -803,17 +669,14 @@ class ASMRFetcher:
         seen_ids_set: set[str],
         seen_ids_list: List[str],
     ) -> List[Dict[str, Any]]:
-        """Discover new relevant videos using pytubefix contrib Search.
+        """Discover new relevant videos using pytubefix contrib Search."""
+        if self._pytube_disabled:
+            self.logger.info(
+                "pytubefix has been disabled due to previous BotDetection; "
+                "skipping Search discovery."
+            )
+            return []
 
-        Args:
-            seen_ids_set: Set of already seen video IDs. Used to prevent
-                duplicates. Modified in-place.
-            seen_ids_list: Ordered list of seen IDs; new IDs are appended to
-                preserve insertion order.
-
-        Returns:
-            List of newly discovered video metadata dictionaries.
-        """
         new_items: List[Dict[str, Any]] = []
 
         # Restrict results to videos and sort by relevance.
@@ -827,9 +690,27 @@ class ASMRFetcher:
         count = 0
 
         self.logger.info("Starting pytubefix Search discovery...")
-        search_obj = Search(self.query, filters=filters)
+
+        try:
+            search_obj = Search(self.query, filters=filters)
+        except pytube_exceptions.BotDetection:
+            self.logger.warning(
+                "pytubefix BotDetection when initializing Search; "
+                "disabling pytubefix for the rest of this run"
+            )
+            self._pytube_disabled = True
+            return []
+        except Exception:
+            self.logger.warning(
+                "Failed to initialize pytubefix Search; skipping Search discovery this run"
+            )
+            return []
 
         for v in search_obj.videos:
+            if self._pytube_disabled:
+                # BotDetection could have been triggered elsewhere mid-loop.
+                break
+
             if count >= max_results:
                 break
             count += 1
@@ -844,7 +725,23 @@ class ASMRFetcher:
             if not video_id or video_id in seen_ids_set:
                 continue
 
-            title = getattr(v, "title", "") or ""
+            # Title access can trigger BotDetection via check_availability().
+            try:
+                title = getattr(v, "title", "") or ""
+            except pytube_exceptions.BotDetection:
+                self.logger.warning(
+                    "pytubefix BotDetection when accessing title for video %s; "
+                    "disabling pytubefix Search for the rest of this run",
+                    video_id,
+                )
+                self._pytube_disabled = True
+                break
+            except Exception:
+                self.logger.warning(
+                    "Failed to get title from pytubefix search result; skipping video %s",
+                    video_id,
+                )
+                title = ""
 
             # Try to get duration from search object.
             try:
@@ -908,30 +805,7 @@ class ASMRFetcher:
     # Load existing JSON (new structure only)
     # -------------------------------------------------------------------------
     def _load_existing_by_id(self) -> Dict[str, Dict[str, Any]]:
-        """Load existing videos from JSON file into a dict keyed by videoId.
-
-        Assumes JSON is in the unified structure:
-
-            {
-                "<videoId>": {
-                    "title": "...",
-                    "duration": ...,
-                    "channelId": "...",
-                    "author": "...",
-                    "views": ...,
-                    "likes": ...,
-                    "description": "...",
-                    "uploadDate": "...",
-                    "language": "...",
-                    "channel_average_views": ...
-                },
-                ...
-            }
-
-        Returns:
-            Mapping from videoId to its metadata. If the JSON file does not
-            exist or cannot be parsed, an empty dict is returned.
-        """
+        """Load existing videos from JSON file into a dict keyed by videoId."""
         if not os.path.exists(self.json_output):
             return {}
 
@@ -962,17 +836,6 @@ class ASMRFetcher:
 
         The method name is historical and kept for backward compatibility; it
         works for any query (not just ASMR).
-
-        This method orchestrates:
-            1. Loading existing video metadata and seen IDs.
-            2. Discovering new videos via the YouTube Data API (if enabled).
-            3. Discovering additional videos via pytubefix Search.
-            4. Ensuring metadata completeness **only for newly added videos**.
-            5. Writing a unified JSON file keyed by videoId.
-            6. Updating the `seen_video_ids.txt` file.
-
-        Returns:
-            A list of newly added unique video IDs for this run.
         """
         # 1) Load existing videos and treat them as already known.
         existing_by_id = self._load_existing_by_id()
