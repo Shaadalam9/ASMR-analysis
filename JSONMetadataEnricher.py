@@ -1,5 +1,5 @@
 # -*- coding: utf-8 -*-
-"""Enrich existing YouTube JSON with uploadDate, language, and channel_average_views.
+"""Enrich existing YouTube JSON with uploadDate, language, views, likes, and channel_average_views.
 
 This script is intended to be run on an *existing* JSON file containing
 YouTube video metadata keyed by videoId.
@@ -10,6 +10,7 @@ It will:
         - Add / fix `uploadDate` if missing or null.
         - Add / fix `language` using langdetect (fallback).
         - Add / fix `channel_average_views` using the YouTube Data API.
+        - Optionally refresh `views` and `likes` (API + pytubefix).
     * Write the updated JSON back to disk (by default in-place).
 
 Expected JSON structure (input and output):
@@ -33,13 +34,10 @@ Expected JSON structure (input and output):
     }
 
 Design goals:
-    * Only hit pytubefix / YouTube API when needed (missing fields).
+    * Only hit pytubefix / YouTube API when needed (missing fields or refresh flags).
     * Cache channel statistics per channel ID to avoid repeated calls.
     * Stop calling the channel stats API for this run if quotaExceeded occurs.
     * Play nicely with your CustomLogger (no dangerous `{}` in log messages).
-
-Requirements:
-    pip install pytubefix google-api-python-client langdetect
 
 Configuration:
     * `common.get_configs("data")` provides the data folder.
@@ -69,38 +67,43 @@ DetectorFactory.seed = 0
 
 
 class JSONMetadataEnricher:
-    """Enrich existing JSON metadata with uploadDate, language, and channel_average_views.
+    """Enrich existing JSON metadata with uploadDate, language, views, likes, and channel_average_views.
 
     This class:
       * Loads a JSON file (dict keyed by videoId).
       * For each video:
           - Fetches uploadDate, language, and channel_average_views (when possible).
-          - Updates only missing/empty fields to avoid clobbering existing values.
+          - Optionally refreshes views and likes.
+          - Updates only missing/empty fields by default, unless flags say otherwise.
       * Writes the updated JSON file back to disk.
 
     Attributes:
         json_path: Full path to the JSON file to update.
         youtube: YouTube Data API client or None if no API key is set.
         logger: Custom logger instance for structured logging.
+        update_views_likes: If True, refresh views/likes even if they are present.
+        force_refresh_channel_avg: If True, recompute channel_average_views even if present.
         _channel_stats_cache: In-memory cache for channel statistics lookups.
         _channel_stats_quota_exceeded: Flag set to True once quotaExceeded is
             encountered, to avoid further failing calls this run.
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str],
-        json_path: str,
-    ) -> None:
+    def __init__(self, api_key: Optional[str], json_path: str, update_views_likes: bool = False,
+                 force_refresh_channel_avg: bool = False) -> None:
         """Initialize JSONMetadataEnricher.
 
         Args:
             api_key: YouTube API key. If None or empty, channel_average_views
-                will not be populated (remains None).
+                and API-based views/likes will not be populated.
             json_path: Path to the JSON file to enrich.
+            update_views_likes: If True, update views/likes even when they exist.
+            force_refresh_channel_avg: If True, recompute channel_average_views
+                even when it exists.
         """
         self.json_path = json_path
         self.api_key = api_key or None
+        self.update_views_likes = update_views_likes
+        self.force_refresh_channel_avg = force_refresh_channel_avg
 
         # Initialize logging.
         logs(show_level=common.get_configs("logger_level"), show_color=True)
@@ -113,7 +116,7 @@ class JSONMetadataEnricher:
         else:
             self.youtube = None
             self.logger.info(
-                "No API key provided. channel_average_views will be left as None."
+                "No API key provided. channel_average_views and API-based views/likes will be left as None."
             )
 
         # In-memory cache to avoid repeated channel stats calls.
@@ -127,18 +130,7 @@ class JSONMetadataEnricher:
     # Core helpers
     # -------------------------------------------------------------------------
     def _normalize_upload_date(self, val: Any) -> Optional[str]:
-        """Normalize upload date to a string, if possible.
-
-        This method accepts common date-like values (e.g. datetime.date,
-        datetime.datetime, string) and returns an ISO-formatted string when
-        possible.
-
-        Args:
-            val: Raw upload date value.
-
-        Returns:
-            Normalized upload date string or None if not available.
-        """
+        """Normalize upload date to a string, if possible."""
         if val is None:
             return None
 
@@ -148,7 +140,6 @@ class JSONMetadataEnricher:
             if isinstance(val, (datetime.date, datetime.datetime)):
                 return val.isoformat()
         except Exception:
-            # Fall back to generic conversion.
             pass
 
         try:
@@ -157,37 +148,30 @@ class JSONMetadataEnricher:
             return None
 
     def _detect_language(self, text: str) -> Optional[str]:
-        """Detect the language of the given text.
-
-        Uses the `langdetect` library to infer the language code from free-form
-        text (e.g. title + description).
-
-        Args:
-            text: Input text used for language detection.
-
-        Returns:
-            BCP-47-like language code (e.g. "en", "fr", "de") if detection
-            succeeds; otherwise None.
-        """
+        """Detect the language of the given text using langdetect."""
         text = (text or "").strip()
         if not text:
             return None
         try:
             return detect(text)
         except Exception:
-            # Detection can fail on very short or noisy text.
             return None
 
+    def _normalize_int(self, val: Any) -> Optional[int]:
+        """Normalize numeric fields (views/likes) to integers when possible."""
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val
+        if isinstance(val, float):
+            return int(val)
+        if isinstance(val, str):
+            s = val.replace(",", "").strip()
+            return int(s) if s.isdigit() else None
+        return None
+
     def _is_missing(self, val: Any) -> bool:
-        """Check whether a metadata value should be considered missing.
-
-        Args:
-            val: Value to check.
-
-        Returns:
-            True if the value is None or an empty/whitespace-only string;
-            False otherwise.
-        """
+        """Check whether a metadata value should be considered missing."""
         if val is None:
             return True
         if isinstance(val, str) and val.strip() == "":
@@ -198,35 +182,17 @@ class JSONMetadataEnricher:
     # Channel statistics helper
     # -------------------------------------------------------------------------
     def _fetch_channel_average_views(self, channel_id: str) -> Optional[float]:
-        """Fetch average views per video for a given channel using the YouTube Data API.
-
-        This method queries the channel statistics and computes:
-
-            channel_average_views = viewCount / videoCount
-
-        Results are cached in-memory per channel ID to avoid repeated API calls
-        during a single run.
-
-        Args:
-            channel_id: The YouTube channel ID.
-
-        Returns:
-            Average views per video as a float, or None if unavailable or
-            if the YouTube API client is not configured or quota is exceeded.
-        """
+        """Fetch average views per video for a given channel using the YouTube Data API."""
         if not channel_id:
             return None
 
-        # If we've already decided not to call the API anymore this run, bail out.
         if self._channel_stats_quota_exceeded:
             return None
 
-        # Return from cache if present (even if cached None).
         if channel_id in self._channel_stats_cache:
             return self._channel_stats_cache[channel_id]
 
         if self.youtube is None:
-            # Cannot compute without YouTube Data API.
             self._channel_stats_cache[channel_id] = None
             return None
 
@@ -250,18 +216,14 @@ class JSONMetadataEnricher:
             else:
                 avg = total_views / float(total_videos)
 
-            # Cache result (including None) so we don't refetch this run.
             self._channel_stats_cache[channel_id] = avg
             return avg
 
         except Exception as exc:  # noqa: BLE001
-            # Do NOT put exc string into the format message (it may contain braces).
             self.logger.warning(
                 "Failed to fetch channel statistics; channel_average_views will be None for this channel"
             )
 
-            # If this looks like a quotaExceeded error, remember it so we
-            # do not hammer the API with more failing requests this run.
             if "quotaExceeded" in str(exc):
                 self._channel_stats_quota_exceeded = True
                 self.logger.warning(
@@ -273,28 +235,39 @@ class JSONMetadataEnricher:
             return None
 
     # -------------------------------------------------------------------------
+    # Video statistics helper (views/likes) via API
+    # -------------------------------------------------------------------------
+    def _fetch_video_stats_api(self, video_id: str) -> Dict[str, Optional[int]]:
+        """Fetch video statistics (views, likes) via YouTube Data API."""
+        if not self.youtube:
+            return {"views": None, "likes": None}
+
+        try:
+            response = self.youtube.videos().list(  # type: ignore[call-arg]
+                part="statistics",
+                id=video_id,
+            ).execute()
+            items = response.get("items", [])
+            if not items:
+                return {"views": None, "likes": None}
+
+            stats = items[0].get("statistics", {})
+            view_count = self._normalize_int(stats.get("viewCount"))
+            like_count = self._normalize_int(stats.get("likeCount"))
+            return {"views": view_count, "likes": like_count}
+        except Exception:
+            self.logger.warning(
+                "Failed to fetch video statistics via API for video {}; keeping existing views/likes".format(
+                    video_id
+                )
+            )
+            return {"views": None, "likes": None}
+
+    # -------------------------------------------------------------------------
     # pytubefix metadata helper
     # -------------------------------------------------------------------------
     def _fetch_video_metadata_pytubefix(self, video_id: str) -> Dict[str, Any]:
-        """Fetch video metadata via pytubefix (for uploadDate, language, etc.).
-
-        This method uses pytubefix's `YouTube` class to load metadata for a single
-        video and returns a dictionary of fields that are useful for enrichment.
-
-        Args:
-            video_id: YouTube video ID (11-character string).
-
-        Returns:
-            A dictionary with keys:
-                - "uploadDate" (str or None)
-                - "language" (str or None)
-                - "description" (str or None)
-                - "title" (str or None)
-                - "channelId" (str or None)
-                - "author" (str or None)
-
-            Any field not retrievable will be returned as None.
-        """
+        """Fetch video metadata via pytubefix (uploadDate, language, views, likes, etc.)."""
         url = f"https://www.youtube.com/watch?v={video_id}"
 
         try:
@@ -310,6 +283,8 @@ class JSONMetadataEnricher:
                 "title": None,
                 "channelId": None,
                 "author": None,
+                "views": None,
+                "likes": None,
             }
 
         title = getattr(yt, "title", None)
@@ -317,10 +292,14 @@ class JSONMetadataEnricher:
         publish_raw = getattr(yt, "publish_date", None)
         channel_id = getattr(yt, "channel_id", None)
         author = getattr(yt, "author", None)
+        views_raw = getattr(yt, "views", None)
+        likes_raw = getattr(yt, "likes", None)
 
         upload_date = self._normalize_upload_date(publish_raw)
         combined_text = f"{title or ''} {description or ''}"
         language = self._detect_language(combined_text)
+        views = self._normalize_int(views_raw)
+        likes = self._normalize_int(likes_raw)
 
         return {
             "uploadDate": upload_date,
@@ -329,18 +308,15 @@ class JSONMetadataEnricher:
             "title": title,
             "channelId": channel_id,
             "author": author,
+            "views": views,
+            "likes": likes,
         }
 
     # -------------------------------------------------------------------------
     # JSON load/save
     # -------------------------------------------------------------------------
     def _load_json(self) -> Dict[str, Dict[str, Any]]:
-        """Load the JSON file into a dict keyed by videoId.
-
-        Returns:
-            Mapping from videoId to its metadata. If the JSON file does not
-            exist or cannot be parsed, an empty dict is returned.
-        """
+        """Load the JSON file into a dict keyed by videoId."""
         if not os.path.exists(self.json_path):
             self.logger.warning(
                 "JSON file '{}' does not exist. Nothing to enrich.".format(
@@ -366,7 +342,6 @@ class JSONMetadataEnricher:
             )
             return {}
 
-        # Ensure each value is a dict.
         result: Dict[str, Dict[str, Any]] = {}
         for vid, meta in data.items():
             if not isinstance(meta, dict):
@@ -376,16 +351,11 @@ class JSONMetadataEnricher:
         return result
 
     def _save_json(self, data: Dict[str, Dict[str, Any]]) -> None:
-        """Save the updated JSON back to disk.
-
-        Args:
-            data: Mapping from videoId to metadata dictionaries.
-        """
+        """Save the updated JSON back to disk."""
         tmp_path = self.json_path + ".tmp"
         with open(tmp_path, "w", encoding="utf-8") as f:
             json.dump(data, f, indent=4, ensure_ascii=False)
 
-        # Replace original atomically (best-effort on most OSes).
         os.replace(tmp_path, self.json_path)
         self.logger.info("Updated JSON written to '{}'.".format(self.json_path))
 
@@ -393,24 +363,15 @@ class JSONMetadataEnricher:
     # Enrichment logic
     # -------------------------------------------------------------------------
     def _enrich_single_video(self, video_id: str, meta: Dict[str, Any]) -> None:
-        """Enrich a single video's metadata in-place.
+        """Enrich a single video's metadata in-place."""
+        # Fields that, if missing, justify a pytubefix metadata fetch.
+        base_fields = ("uploadDate", "language", "description", "title", "channelId", "author")
 
-        This will:
-            * Fill missing uploadDate using pytubefix.
-            * Fill missing language using pytubefix and/or langdetect.
-            * Fill missing channelId / author if possible.
-            * Fill missing channel_average_views using YouTube Data API.
+        need_pytube = any(self._is_missing(meta.get(field)) for field in base_fields)
 
-        Args:
-            video_id: ID of the video to enrich.
-            meta: Metadata dictionary to update in-place.
-        """
-        # Avoid unnecessary network calls: only fetch pytubefix metadata
-        # if at least one of these fields is missing.
-        need_pytube = any(
-            self._is_missing(meta.get(field))
-            for field in ("uploadDate", "language", "description", "title", "channelId", "author")
-        )
+        # If we want to refresh views/likes, we will likely need metadata anyway.
+        if self.update_views_likes:
+            need_pytube = True
 
         extra: Dict[str, Any] = {}
         if need_pytube:
@@ -449,22 +410,45 @@ class JSONMetadataEnricher:
                 language = self._detect_language(combined_text)
             meta["language"] = language
 
-        # channel_average_views via API, if possible.
-        if "channel_average_views" not in meta or meta.get("channel_average_views") is None:
-            channel_id = meta.get("channelId")
+        # --- views & likes (API preferred, pytubefix as fallback) ---
+        # Decide whether we should touch views/likes.
+        if self.update_views_likes or self._is_missing(meta.get("views")):
+            new_views: Optional[int] = None
+            # Try API first
+            stats = self._fetch_video_stats_api(video_id)
+            new_views = stats["views"]
+            # Fallback to pytubefix metadata if API didn't give anything.
+            if new_views is None and extra:
+                new_views = extra.get("views")
+            if new_views is not None:
+                meta["views"] = new_views
+
+        if self.update_views_likes or self._is_missing(meta.get("likes")):
+            new_likes: Optional[int] = None
+            stats = self._fetch_video_stats_api(video_id)
+            new_likes = stats["likes"]
+            if new_likes is None and extra:
+                new_likes = extra.get("likes")
+            if new_likes is not None:
+                meta["likes"] = new_likes
+
+        # --- channel_average_views ---
+        # Ensure we have a channelId: may have been filled from extra.
+        channel_id = meta.get("channelId")
+        if self.force_refresh_channel_avg:
             if channel_id:
                 meta["channel_average_views"] = self._fetch_channel_average_views(
                     channel_id
                 )
+        else:
+            if "channel_average_views" not in meta or meta.get("channel_average_views") is None:
+                if channel_id:
+                    meta["channel_average_views"] = self._fetch_channel_average_views(
+                        channel_id
+                    )
 
     def enrich_json(self) -> None:
-        """Main entry point to enrich the JSON file.
-
-        This method:
-            1. Loads the JSON.
-            2. Iterates over all video entries, enriching each one in-place.
-            3. Writes the updated JSON back to disk.
-        """
+        """Main entry point to enrich the JSON file."""
         data = self._load_json()
         if not data:
             self.logger.info("No data loaded. Exiting without changes.")
@@ -478,10 +462,12 @@ class JSONMetadataEnricher:
         for idx, (video_id, meta) in enumerate(data.items(), start=1):
             try:
                 self._enrich_single_video(video_id, meta)
-            except Exception as exc:  # noqa: F841
+            except Exception:
                 self.logger.warning(
-                    f"Failed to enrich video {video_id} at index {idx}; skipping this video."
+                    "Failed to enrich video {} at index {}; skipping this video.".format(
+                        video_id, idx
                     )
+                )
 
             if idx % 50 == 0 or idx == total:
                 self.logger.info("Progress: {} / {} videos enriched.".format(idx, total))
@@ -496,19 +482,20 @@ class JSONMetadataEnricher:
 # Standalone execution entry point
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
-    # Get API key (may be None/empty; then channel_average_views will stay None).
+    # Get API key (may be None/empty; then channel_average_views & API stats may stay None).
     secret_api = common.get_secrets("google-api-key")
 
     # Resolve data folder and JSON filename from configs.
     data_folder = common.get_configs("data")
     os.makedirs(data_folder, exist_ok=True)
 
-    # You can change this to another filename if needed.
     json_filename = "asmr_results.json"
     json_path = os.path.join(data_folder, json_filename)
 
     enricher = JSONMetadataEnricher(
-        api_key=secret_api,  # type: ignore
+        api_key=secret_api,          # type: ignore
         json_path=json_path,
+        update_views_likes=False,     # <- refresh views & likes even if present
+        force_refresh_channel_avg=False,  # <- refresh channel_average_views even if present
     )
     enricher.enrich_json()
