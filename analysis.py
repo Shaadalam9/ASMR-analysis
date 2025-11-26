@@ -25,34 +25,29 @@ import os
 import re
 import shutil
 import warnings
+from collections import Counter
 from datetime import datetime, timezone
 from typing import Any, Dict, Optional, Set, Tuple
-
 import numpy as np
 import pandas as pd
 import plotly as py
 import plotly.express as px
 from wordcloud import WordCloud, STOPWORDS
-
-import common  # your existing project config module
-
-# Optional: ML imports for clustering.
-try:
-    from sklearn.cluster import KMeans
-    from sklearn.compose import ColumnTransformer
-    from sklearn.feature_extraction.text import TfidfVectorizer
-    from sklearn.pipeline import Pipeline
-    from sklearn.preprocessing import OneHotEncoder, StandardScaler
-    from sklearn.decomposition import PCA
-
-    SKLEARN_AVAILABLE = True
-except ImportError:
-    SKLEARN_AVAILABLE = False
+import common
+from sklearn.cluster import KMeans
+from sklearn.compose import ColumnTransformer
+from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.pipeline import Pipeline
+from sklearn.preprocessing import OneHotEncoder, StandardScaler
+from sklearn.decomposition import PCA
+import spacy
 
 # Default scaling factor for saved PNG images.
 SCALE = 3
 
 logger = logging.getLogger(__name__)
+
+_NLP_CACHE: Optional["spacy.language.Language"] = None  # type: ignore[valid-type]
 
 # ============================================================================
 # Shared: load JSON
@@ -65,8 +60,9 @@ def load_asmr_data(json_path: str) -> Dict[str, Any]:
         data = json.load(f)
     return data
 
+
 # ============================================================================
-# PART 1 — WORDCLOUD PIPELINE (original logic)
+# PART 1 — WORDCLOUD PIPELINE
 # ============================================================================
 
 
@@ -104,13 +100,11 @@ def build_corpus(data: Dict[str, Any], source: str) -> str:
 
 
 def clean_text(text: str) -> str:
-    """Simple cleaning for wordcloud text."""
+    """Simple cleaning for wordcloud / spaCy text."""
     # Remove URLs.
     text = re.sub(r"http\S+", " ", text)
-
     # Replace actual newlines with spaces.
     text = re.sub(r"[\r\n]+", " ", text)
-
     return text
 
 
@@ -123,35 +117,28 @@ def get_custom_stopwords() -> Set[str]:
         "asmr", "ASMR",
 
         # Basic English stopwords.
-        "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-        "any", "are", "aren't", "as", "at", "be", "because", "been", "before", "being",
-        "below", "between", "both", "but", "by", "can", "could", "couldn't", "did",
-        "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each",
-        "few", "for", "from", "further", "had", "hadn't", "has", "hasn't", "have",
-        "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here", "here's",
-        "hers", "herself", "him", "himself", "his", "how", "how's", "i", "i'd",
-        "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its",
-        "itself", "let's", "me", "more", "most", "mustn't", "my", "myself", "no", "nor",
-        "not", "of", "off", "on", "once", "only", "or", "other", "ought", "our",
-        "ours", "ourselves", "out", "over", "own", "same", "shan't", "she", "she'd",
-        "she'll", "she's", "should", "shouldn't", "so", "some", "such", "than", "that",
-        "that's", "the", "their", "theirs", "them", "themselves", "then", "there",
-        "there's", "these", "they", "they'd", "they'll", "they're", "they've", "this",
-        "those", "through", "to", "too", "under", "until", "up", "very", "was",
-        "wasn't", "we", "we'd", "we'll", "we're", "we've", "were", "weren't", "what",
-        "what's", "when", "when's", "where", "where's", "which", "while", "who",
-        "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't", "you",
-        "you'd", "you'll", "you're", "you've", "your", "yours", "yourself",
-        "yourselves",
+        "a", "about", "above", "after", "again", "against", "all", "am", "an", "and", "any", "are", "aren't", "as",
+        "at", "be", "because", "been", "before", "being", "below", "between", "both", "but", "by", "can", "could",
+        "couldn't", "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during", "each", "few",
+        "for", "from", "further", "had", "hadn't", "has", "hasn't", "have", "haven't", "having", "he", "he'd",
+        "he'll", "he's", "her", "here", "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i",
+        "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it", "it's", "its", "itself", "let's",
+        "me", "more", "most", "mustn't", "my", "myself", "no", "nor", "not", "of", "off", "on", "once", "only",
+        "or", "other", "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't", "she", "she'd",
+        "she'll", "she's", "should", "shouldn't", "so", "some", "such", "than", "that", "that's", "the", "their",
+        "theirs", "them", "themselves", "then", "there", "there's", "these", "they", "they'd", "they'll", "they're",
+        "they've", "this", "those", "through", "to", "too", "under", "until", "up", "very", "was", "wasn't", "we",
+        "we'd", "we'll", "we're", "we've", "were", "weren't", "what", "what's", "when", "when's", "where", "where's",
+        "which", "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would", "wouldn't", "you",
+        "you'd", "you'll", "you're", "you've", "your", "yours", "yourself", "yourselves",
 
         # Social media fillers.
-        "thanks", "thank", "thankyou", "thanksgiving", "subscribe", "sub", "follow",
-        "like", "likes", "watch", "watching", "video", "videos", "link", "please",
-        "dm", "instagram", "tiktok", "channel",
+        "thanks", "thank", "thankyou", "thanksgiving", "subscribe", "sub", "follow", "like", "likes", "watch",
+        "watching", "video", "videos", "link", "please", "dm", "instagram", "tiktok", "channel",
 
         # French fillers.
-        "le", "la", "les", "de", "du", "des", "un", "une", "et", "en", "dans", "ce",
-        "ces", "je", "tu", "que", "qui", "au", "aux", "pour", "mais",
+        "le", "la", "les", "de", "du", "des", "un", "une", "et", "en", "dans",
+        "ce", "ces", "je", "tu", "que", "qui", "au", "aux", "pour", "mais",
     }
     stopwords.update(custom_stopwords)
 
@@ -162,10 +149,8 @@ def get_custom_stopwords() -> Set[str]:
 
     # Punctuation tokens.
     punctuation_tokens = {
-        ".", ",", "!", "?", ":", ";",
-        "-", "_", "(", ")", "[", "]", "{", "}",
-        "'", '"', "/", "\\", "|", "&", "*", "#", "@",
-        "...", "..",
+        ".", ",", "!", "?", ":", ";", "-", "_", "(", ")", "[", "]", "{", "}", "'",
+        '"', "/", "\\", "|", "&", "*", "#", "@", "...", "..",
     }
     stopwords.update(punctuation_tokens)
 
@@ -183,9 +168,8 @@ def generate_wordcloud_image(text: str, stopwords: Set[str]):
         height=600,
         background_color="white",
         stopwords=stopwords,
-        collocations=False,  # Treat word pairs separately.
+        collocations=False,
     ).generate(text)
-
     img = wordcloud.to_array()
     return img
 
@@ -202,16 +186,9 @@ def create_plotly_figure(img, title: str = "") -> Any:
     return fig
 
 
-def save_plotly_figure(
-    fig: Any,
-    filename: str,
-    width: int = 1600,
-    height: int = 900,
-    scale: int = SCALE,
-    save_final: bool = True,
-    save_png: bool = True,
-    save_eps: bool = True,
-) -> None:
+def save_plotly_figure(fig: Any, filename: str, width: int = 1600, height: int = 900,
+                       scale: int = SCALE, save_final: bool = True, save_png: bool = True,
+                       save_eps: bool = True) -> None:
     """Save a Plotly figure as HTML, PNG, and EPS formats."""
     output_final = os.path.join(common.root_dir, "figures")
     os.makedirs(common.output_dir, exist_ok=True)
@@ -309,6 +286,93 @@ def run_wordcloud_pipeline(data: Dict[str, Any]) -> None:
             save_eps=True,
         )
 
+
+# ============================================================================
+# spaCy helpers: model + lemma keyword counts
+# ============================================================================
+
+
+def get_spacy_nlp(model_name: str = "en_core_web_sm"):
+    """Lazy-load and cache a spaCy model."""
+    global _NLP_CACHE
+    if _NLP_CACHE is not None:
+        return _NLP_CACHE
+
+    try:
+        # We don't need parser/ner for these tasks.
+        nlp = spacy.load(model_name, disable=["parser", "ner"])
+        # Allow larger texts than default (your corpus is ~1.3M chars).
+        nlp.max_length = max(nlp.max_length, 2_000_000)
+    except Exception as exc:
+        logger.warning("Could not load spaCy model '%s': %s", model_name, exc)
+        return None
+
+    _NLP_CACHE = nlp
+    return nlp
+
+
+def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[Set[str]] = None,
+                                 source: str = "both", model_name: str = "en_core_web_sm") -> pd.DataFrame:
+    """
+    Use spaCy to count lemmas of interest (e.g. drive, whisper, barber)
+    in titles/descriptions and return a DataFrame with counts.
+    """
+    nlp = get_spacy_nlp(model_name)
+    if nlp is None:
+        return pd.DataFrame(columns=["lemma", "count"])
+
+    if target_lemmas is None:
+        target_lemmas = {"drive", "whisper", "barber"}
+
+    target_lemmas = {w.lower() for w in target_lemmas}
+
+    raw_text = build_corpus(data, source=source)
+    cleaned_text = clean_text(raw_text)
+
+    logger.info(
+        "Running spaCy over corpus for keyword counts (len=%d chars)...",
+        len(cleaned_text),
+    )
+
+    doc = nlp(cleaned_text)
+
+    counts: Counter = Counter()
+    for token in doc:
+        if not token.is_alpha:
+            continue
+        if token.is_stop:
+            continue
+
+        lemma = token.lemma_.lower()
+        if lemma in target_lemmas:
+            counts[lemma] += 1
+
+    if not counts:
+        logger.warning(
+            "No occurrences found for target lemmas: %s",
+            sorted(target_lemmas),
+        )
+        return pd.DataFrame(columns=["lemma", "count"])
+
+    df = pd.DataFrame(
+        {"lemma": list(counts.keys()), "count": list(counts.values())}
+    ).sort_values("count", ascending=False)
+
+    return df
+
+
+def plot_spacy_keyword_bar(keyword_df: pd.DataFrame, title: str = "Keyword frequencies (spaCy lemmas)",
+                           filename: str = "spacy_keyword_bar") -> None:
+    """Create and save a bar plot of lemma counts from spaCy analysis."""
+    if keyword_df.empty:
+        logger.warning("Keyword DataFrame is empty; no spaCy bar plot created.")
+        return
+
+    fig = px.bar(keyword_df, x="lemma", y="count", title=title, 
+                 labels={"lemma": "Lemma", "count": "Frequency in corpus"})
+    save_plotly_figure(fig, filename=filename, width=1600, height=900, scale=SCALE)
+
+
 # ============================================================================
 # PART 2 — ANALYTICS & CLUSTERING
 # ============================================================================
@@ -356,10 +420,198 @@ def _duration_bucket(minutes: float) -> str:
     return "other"
 
 
-def json_to_dataframe(
-    data: Dict[str, Any],
-    reference_date: Optional[datetime] = None,
-) -> pd.DataFrame:
+def add_title_style_features(df: pd.DataFrame) -> pd.DataFrame:
+    """Add features capturing 'title style'."""
+    titles = df["title"].fillna("")
+
+    df["title_word_count"] = titles.str.split().str.len()
+    df["title_char_count"] = titles.str.len()
+    df["title_has_brackets"] = titles.str.contains(r"[\[\]\(\)]", regex=True)
+    df["title_has_all_caps_word"] = titles.str.contains(r"\b[A-Z]{3,}\b")
+    df["title_has_exclamation"] = titles.str.contains("!")
+    df["title_has_question"] = titles.str.contains(r"\?")
+    df["title_has_hashtag"] = titles.str.contains("#")
+    df["title_has_no_talking_tag"] = titles.str.contains(
+        r"no[-\s]?talk(?:ing)?", case=False, regex=True
+    )
+    return df
+
+
+def add_theme_flags(df: pd.DataFrame, model_name: str = "en_core_web_sm") -> pd.DataFrame:
+    """
+    Add boolean columns for content themes using spaCy only (no external THEME_KEYWORDS dict).
+
+    Themes:
+        - has_whisper
+        - has_no_talking
+        - has_sleep
+        - has_binaural
+        - has_roleplay
+        - has_ear_cleaning
+        - has_mukbang
+        - has_keyboard
+        - has_visual
+    """
+    nlp = get_spacy_nlp(model_name)
+    theme_cols = ["has_whisper", "has_no_talking", "has_sleep", "has_binaural", "has_roleplay", "has_ear_cleaning",
+                  "has_mukbang", "has_keyboard", "has_visual"]
+
+    # Ensure columns exist and default to False (even if we bail early).
+    for col in theme_cols:
+        if col not in df.columns:
+            df[col] = False
+
+    if nlp is None:
+        logger.warning("spaCy not available; theme flags remain False.")
+        return df
+
+    texts = (
+        df["title"].fillna("") + " " + df["description"].fillna("")  # type: ignore
+    ).tolist()  # type: ignore
+
+    logger.info("Running spaCy theme detection on %d videos...", len(df))
+
+    # Lemma sets per theme
+    WHISPER_LEMMAS = {"whisper"}
+    SLEEP_LEMMAS = {"sleep", "insomnia"}
+    ROLEPLAY_LEMMAS = {"roleplay", "exam", "checkup", "check-up", "haircut", "barber"}
+    EAR_LEMMAS = {"ear", "otoscope"}
+    MUKBANG_LEMMAS = {"mukbang"}
+    KEYBOARD_LEMMAS = {"keyboard", "type"}
+    VISUAL_LEMMAS = {"visual", "movement", "trigger"}
+
+    for idx, doc in zip(df.index, nlp.pipe(texts, batch_size=256)):
+        lower_text = doc.text.lower()
+
+        # --- has_whisper ---
+        has_whisper = any(tok.lemma_.lower() in WHISPER_LEMMAS for tok in doc)
+
+        # --- has_no_talking ---
+        has_no_talking = False
+        if (
+            "no talking" in lower_text
+            or "no-talk" in lower_text
+            or "no talk" in lower_text
+            or "without talking" in lower_text
+        ):
+            has_no_talking = True
+        else:
+            for i, tok in enumerate(doc):
+                if tok.lemma_.lower() in {"talk", "speak"} and i > 0:
+                    prev = doc[i - 1]
+                    if prev.lemma_.lower() in {"no", "without"}:
+                        has_no_talking = True
+                        break
+
+        # --- has_sleep ---
+        has_sleep = any(tok.lemma_.lower() in SLEEP_LEMMAS for tok in doc) or "for sleep" in lower_text
+
+        # --- has_binaural ---
+        has_binaural = any(
+            kw in lower_text
+            for kw in ["binaural", "3dio", "3d audio", "3d sound", "8d audio", "8d sound"]
+        )
+
+        # --- has_roleplay ---
+        has_roleplay = False
+        if "roleplay" in lower_text or "rp " in lower_text or " rp" in lower_text:
+            has_roleplay = True
+        else:
+            for tok in doc:
+                if tok.lemma_.lower() in ROLEPLAY_LEMMAS:
+                    has_roleplay = True
+                    break
+
+        # --- has_ear_cleaning ---
+        has_ear_cleaning = False
+        if (
+            "ear cleaning" in lower_text
+            or "ear massage" in lower_text
+            or "ear exam" in lower_text
+            or "ear attention" in lower_text
+            or "ear brushing" in lower_text
+        ):
+            has_ear_cleaning = True
+        else:
+            for i, tok in enumerate(doc):
+                if tok.lemma_.lower() in EAR_LEMMAS:
+                    window = doc[max(0, i - 3): i + 4]
+                    for w in window:
+                        if w.lemma_.lower() in {"clean", "brush", "massage", "attention"}:
+                            has_ear_cleaning = True
+                            break
+                if has_ear_cleaning:
+                    break
+
+        # --- has_mukbang ---
+        has_mukbang = (
+            "mukbang" in lower_text
+            or "eating asmr" in lower_text
+            or "eating sounds" in lower_text
+            or "eating show" in lower_text
+        )
+        if not has_mukbang:
+            for tok in doc:
+                if tok.lemma_.lower() in MUKBANG_LEMMAS:
+                    has_mukbang = True
+                    break
+
+        # --- has_keyboard ---
+        has_keyboard = "keyboard" in lower_text
+        if not has_keyboard:
+            for tok in doc:
+                if tok.lemma_.lower() in KEYBOARD_LEMMAS:
+                    has_keyboard = True
+                    break
+
+        # --- has_visual ---
+        has_visual = any(
+            phrase in lower_text
+            for phrase in ["visual triggers", "hand movements", "visuals", "slow movements", "trigger assortment"]
+        )
+        if not has_visual:
+            for tok in doc:
+                if tok.lemma_.lower() in VISUAL_LEMMAS:
+                    has_visual = True
+                    break
+
+        df.at[idx, "has_whisper"] = has_whisper
+        df.at[idx, "has_no_talking"] = has_no_talking
+        df.at[idx, "has_sleep"] = has_sleep
+        df.at[idx, "has_binaural"] = has_binaural
+        df.at[idx, "has_roleplay"] = has_roleplay
+        df.at[idx, "has_ear_cleaning"] = has_ear_cleaning
+        df.at[idx, "has_mukbang"] = has_mukbang
+        df.at[idx, "has_keyboard"] = has_keyboard
+        df.at[idx, "has_visual"] = has_visual
+
+    return df
+
+
+def add_growth_category(df: pd.DataFrame) -> pd.DataFrame:
+    """Add 'growth_category' based on views_per_day quantiles."""
+    vpd = df["views_per_day"]
+    if vpd.notna().sum() == 0:
+        df["growth_category"] = "unknown"
+        return df
+
+    fast_thr = vpd.quantile(0.8)
+    slow_thr = vpd.quantile(0.2)
+
+    def _cat(x):
+        if pd.isna(x):
+            return "unknown"
+        if x >= fast_thr:
+            return "fast_growth"
+        if x <= slow_thr:
+            return "slow_growth"
+        return "medium"
+
+    df["growth_category"] = vpd.apply(_cat)
+    return df
+
+
+def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] = None) -> pd.DataFrame:
     """Convert the raw JSON dict into a pandas DataFrame with derived fields."""
     if reference_date is None:
         reference_date = datetime.now(timezone.utc)
@@ -432,7 +684,8 @@ def json_to_dataframe(
         np.nan,
     )
     df["rel_views_vs_channel_avg"] = np.where(
-        (df["channel_average_views"] > 0) & df["channel_average_views"].notna(),
+        (df["channel_average_views"] > 0)
+        & df["channel_average_views"].notna(),
         df["views"] / df["channel_average_views"],
         np.nan,
     )
@@ -451,71 +704,6 @@ def json_to_dataframe(
     # Growth category.
     df = add_growth_category(df)
 
-    return df
-
-
-def add_title_style_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add features capturing 'title style'."""
-    titles = df["title"].fillna("")
-
-    df["title_word_count"] = titles.str.split().str.len()
-    df["title_char_count"] = titles.str.len()
-    df["title_has_brackets"] = titles.str.contains(r"[\[\]\(\)]", regex=True)
-    df["title_has_all_caps_word"] = titles.str.contains(r"\b[A-Z]{3,}\b")
-    df["title_has_exclamation"] = titles.str.contains("!")
-    df["title_has_question"] = titles.str.contains(r"\?")
-    df["title_has_hashtag"] = titles.str.contains("#")
-    # Use non-capturing group to avoid regex group warning
-    df["title_has_no_talking_tag"] = titles.str.contains(
-        r"no[-\s]?talk(?:ing)?", case=False, regex=True
-    )
-
-    return df
-
-
-THEME_KEYWORDS = {
-    "has_whisper": ["whisper", "whispered", "whispering", "susurro", "susurros", "chuchotement", "flüstern"],
-    "has_no_talking": ["no talking", "no-talking", "no talk", "sin hablar", "sans parler", "senza parlare"],
-    "has_sleep": ["sleep", "sleepy", "for sleep", "insomnia", "insomnio", "dormir", "sommeil", "para dormir"],
-    "has_binaural": ["binaural", "3dio", "3d sound", "3d audio", "8d audio", "8d sound"],
-    "has_roleplay": ["roleplay", "rp ", " rp", "doctor roleplay", "nurse roleplay", "medical roleplay",
-                     "exam", "check up", "check-up", "haircut", "barber", "spa roleplay"],
-    "has_ear_cleaning": ["ear cleaning", "ear exam", "ear massage", "ear attention", "ear brushing", "otoscope"],
-    "has_mukbang": ["mukbang", "eating asmr", "eating sounds", "chewing", "eating show"],
-    "has_keyboard": ["keyboard", "typing", "key sounds", "mechanical keyboard"],
-    "has_visual": ["visual triggers", "hand movements", "visuals", "slow movements", "trigger assortment"],
-}
-
-
-def add_theme_flags(df: pd.DataFrame) -> pd.DataFrame:
-    """Add boolean columns for content themes based on title+description."""
-    text_all = (df["title"].fillna("") + " " + df["description"].fillna("")).str.lower()  # type: ignore
-    for col, keywords in THEME_KEYWORDS.items():
-        pattern = "|".join(map(re.escape, keywords))
-        df[col] = text_all.str.contains(pattern, regex=True)
-    return df
-
-
-def add_growth_category(df: pd.DataFrame) -> pd.DataFrame:
-    """Add 'growth_category' based on views_per_day quantiles."""
-    vpd = df["views_per_day"]
-    if vpd.notna().sum() == 0:
-        df["growth_category"] = "unknown"
-        return df
-
-    fast_thr = vpd.quantile(0.8)
-    slow_thr = vpd.quantile(0.2)
-
-    def _cat(x):
-        if pd.isna(x):
-            return "unknown"
-        if x >= fast_thr:
-            return "fast_growth"
-        if x <= slow_thr:
-            return "slow_growth"
-        return "medium"
-
-    df["growth_category"] = vpd.apply(_cat)
     return df
 
 
@@ -670,16 +858,10 @@ def cluster_videos(
     Also computes a 2D embedding (PCA) and stores it in columns
     'embedding_x' and 'embedding_y' for visualization.
     """
-    if not SKLEARN_AVAILABLE:
-        logger.warning("scikit-learn is not installed; clustering skipped.")
-        df_copy = df.copy()
-        df_copy["cluster"] = -1
-        return df_copy, None
-
     df_copy = df.copy()
     df_copy["text_all"] = (
         df_copy["title"].fillna("") + " " + df_copy["description"].fillna("")  # type: ignore
-    )
+    )  # type: ignore
 
     feature_cols = ["text_all", "duration_minutes", "engagement_rate", "views_per_day", "language"]
 
@@ -736,7 +918,6 @@ def cluster_videos(
     # ---- 2D embedding for visualization (PCA) ----
     try:
         logger.info("Computing 2D PCA embedding for cluster visualization...")
-        # Use the fitted preprocessor to get feature vectors
         features = pipeline.named_steps["preprocess"].transform(X)
 
         reducer = PCA(n_components=2)
@@ -751,6 +932,7 @@ def cluster_videos(
 
     return df_copy, pipeline
 
+
 # ---------------------------------------------------------------------------
 # Plotly figure helpers for analytics
 # ---------------------------------------------------------------------------
@@ -764,35 +946,57 @@ def plot_duration_stats(duration_stats: pd.DataFrame) -> None:
     df_plot = duration_stats.copy()
     order = ["short", "normal", "long", "other", "unknown"]
     df_plot["duration_bucket"] = df_plot["duration_bucket"].astype(str)
-    df_plot["duration_bucket"] = pd.Categorical(df_plot["duration_bucket"], categories=order, ordered=True)
+    df_plot["duration_bucket"] = pd.Categorical(
+        df_plot["duration_bucket"], categories=order, ordered=True
+    )
     df_plot = df_plot.sort_values("duration_bucket")
 
     fig = px.bar(
         df_plot,
         x="duration_bucket",
         y="mean_views",
-        title="Mean views by duration bucket",
+        title="",
         labels={"duration_bucket": "Duration bucket", "mean_views": "Mean views"},
     )
-    save_plotly_figure(fig, "duration_mean_views", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig, "duration_mean_views", width=1600, height=900, scale=SCALE
+    )
 
     fig = px.bar(
         df_plot,
         x="duration_bucket",
         y="mean_views_per_day",
-        title="Mean views per day by duration bucket",
-        labels={"duration_bucket": "Duration bucket", "mean_views_per_day": "Mean views per day"},
+        title="",
+        labels={
+            "duration_bucket": "Duration bucket",
+            "mean_views_per_day": "Mean views per day",
+        },
     )
-    save_plotly_figure(fig, "duration_mean_views_per_day", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "duration_mean_views_per_day",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
     fig = px.bar(
         df_plot,
         x="duration_bucket",
         y="mean_engagement_rate",
-        title="Mean engagement rate by duration bucket",
-        labels={"duration_bucket": "Duration bucket", "mean_engagement_rate": "Mean engagement rate (likes / views)"},
+        title="",
+        labels={
+            "duration_bucket": "Duration bucket",
+            "mean_engagement_rate": "Mean engagement rate (likes / views)",
+        },
     )
-    save_plotly_figure(fig, "duration_mean_engagement_rate", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "duration_mean_engagement_rate",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
@@ -811,19 +1015,34 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
         df_plot,
         x="language",
         y="mean_views_per_day",
-        title=f"Mean views per day by language (>= {min_videos} videos)",
+        title="",
         labels={"language": "Language", "mean_views_per_day": "Mean views per day"},
     )
-    save_plotly_figure(fig, "language_mean_views_per_day", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "language_mean_views_per_day",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
     fig = px.bar(
         df_plot,
         x="language",
         y="mean_engagement_rate",
-        title=f"Mean engagement rate by language (>= {min_videos} videos)",
-        labels={"language": "Language", "mean_engagement_rate": "Mean engagement rate (likes / views)"},
+        title="",
+        labels={
+            "language": "Language",
+            "mean_engagement_rate": "Mean engagement rate (likes / views)",
+        },
     )
-    save_plotly_figure(fig, "language_mean_engagement_rate", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "language_mean_engagement_rate",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_title_style_stats(title_stats: pd.DataFrame) -> None:
@@ -833,26 +1052,46 @@ def plot_title_style_stats(title_stats: pd.DataFrame) -> None:
 
     df_plot = title_stats.copy()
     order = ["<=5 words", "6–10 words", "11–20 words", ">20 words"]
-    df_plot["title_length_bucket"] = pd.Categorical(df_plot["title_length_bucket"], categories=order, ordered=True)
+    df_plot["title_length_bucket"] = pd.Categorical(
+        df_plot["title_length_bucket"], categories=order, ordered=True
+    )
     df_plot = df_plot.sort_values("title_length_bucket")
 
     fig = px.bar(
         df_plot,
         x="title_length_bucket",
         y="mean_engagement_rate",
-        title="Mean engagement rate by title length",
-        labels={"title_length_bucket": "Title length", "mean_engagement_rate": "Mean engagement rate (likes / views)"},
+        title="",
+        labels={
+            "title_length_bucket": "Title length",
+            "mean_engagement_rate": "Mean engagement rate (likes / views)",
+        },
     )
-    save_plotly_figure(fig, "title_length_mean_engagement_rate", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "title_length_mean_engagement_rate",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
     fig = px.bar(
         df_plot,
         x="title_length_bucket",
         y="mean_views",
-        title="Mean views by title length",
-        labels={"title_length_bucket": "Title length", "mean_views": "Mean views"},
+        title="",
+        labels={
+            "title_length_bucket": "Title length",
+            "mean_views": "Mean views",
+        },
     )
-    save_plotly_figure(fig, "title_length_mean_views", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "title_length_mean_views",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_theme_growth_box(df: pd.DataFrame, theme_col: str) -> None:
@@ -868,8 +1107,11 @@ def plot_theme_growth_box(df: pd.DataFrame, theme_col: str) -> None:
         df_plot,
         x=theme_col,
         y="views_per_day",
-        title=f"Views per day distribution by theme: {theme_col}",
-        labels={theme_col: f"{theme_col} (False / True)", "views_per_day": "Views per day"},
+        title="",
+        labels={
+            theme_col: f"{theme_col} (False / True)",
+            "views_per_day": "Views per day",
+        },
     )
     filename = f"{theme_col}_views_per_day_boxplot"
     save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
@@ -887,10 +1129,16 @@ def plot_monthly_counts(monthly_counts: pd.DataFrame) -> None:
         df_plot,
         x="year_month",
         y="video_count",
-        title="Number of ASMR videos per month",
+        title="",
         labels={"year_month": "Month", "video_count": "Number of videos"},
     )
-    save_plotly_figure(fig, "monthly_video_counts", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "monthly_video_counts",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_language_growth(lang_growth: pd.DataFrame, min_total_videos: int = 50) -> None:
@@ -913,10 +1161,20 @@ def plot_language_growth(lang_growth: pd.DataFrame, min_total_videos: int = 50) 
         y="video_count",
         color="language",
         markers=True,
-        title=f"ASMR video uploads per year by language (>= {min_total_videos} videos total)",
-        labels={"upload_year": "Year", "video_count": "Number of videos", "language": "Language"},
+        title="",
+        labels={
+            "upload_year": "Year",
+            "video_count": "Number of videos",
+            "language": "Language",
+        },
     )
-    save_plotly_figure(fig, "language_growth_over_years", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "language_growth_over_years",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_theme_trend_overall(trend_df: pd.DataFrame, theme_col: str) -> None:
@@ -931,7 +1189,7 @@ def plot_theme_trend_overall(trend_df: pd.DataFrame, theme_col: str) -> None:
         df_plot,
         x="upload_year",
         y=share_col,
-        title=f"Share of videos with theme '{theme_col}' over time (all languages)",
+        title="",
         labels={"upload_year": "Year", share_col: "Share of videos"},
         markers=True,
     )
@@ -959,8 +1217,12 @@ def plot_theme_trend_by_language(trend_df: pd.DataFrame, theme_col: str, min_vid
         y=share_col,
         color="language",
         markers=True,
-        title=f"Share of videos with theme '{theme_col}' over time by language",
-        labels={"upload_year": "Year", share_col: "Share of videos", "language": "Language"},
+        title="",
+        labels={
+            "upload_year": "Year",
+            share_col: "Share of videos",
+            "language": "Language",
+        },
     )
     filename = f"{theme_col}_trend_by_language_fig"
     save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
@@ -973,17 +1235,28 @@ def plot_sleep_seasonal(sleep_seasonal: pd.DataFrame) -> None:
 
     df_plot = sleep_seasonal.copy()
     order = ["winter", "spring", "summer", "autumn", "unknown"]
-    df_plot["upload_season"] = pd.Categorical(df_plot["upload_season"], categories=order, ordered=True)
+    df_plot["upload_season"] = pd.Categorical(
+        df_plot["upload_season"], categories=order, ordered=True
+    )
     df_plot = df_plot.sort_values("upload_season")
 
     fig = px.bar(
         df_plot,
         x="upload_season",
         y="sleep_share",
-        title="Share of 'sleep' ASMR videos by season",
-        labels={"upload_season": "Season", "sleep_share": "Share of videos tagged as sleep"},
+        title="",
+        labels={
+            "upload_season": "Season",
+            "sleep_share": "Share of videos tagged as sleep",
+        },
     )
-    save_plotly_figure(fig, "sleep_seasonal_pattern_fig", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig,
+        "sleep_seasonal_pattern_fig",
+        width=1600,
+        height=900,
+        scale=SCALE,
+    )
 
 
 def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
@@ -1009,7 +1282,7 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
         agg,
         x="cluster",
         y="video_count",
-        title="Number of videos per cluster",
+        title="",
         labels={"cluster": "Cluster", "video_count": "Number of videos"},
     )
     save_plotly_figure(fig, "cluster_sizes", width=1600, height=900, scale=SCALE)
@@ -1019,29 +1292,37 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
         agg,
         x="cluster",
         y="mean_views_per_day",
-        title="Mean views per day by cluster",
-        labels={"cluster": "Cluster", "mean_views_per_day": "Mean views per day"},
+        title="",
+        labels={
+            "cluster": "Cluster",
+            "mean_views_per_day": "Mean views per day",
+        },
     )
-    save_plotly_figure(fig, "cluster_mean_views_per_day", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig, "cluster_mean_views_per_day", width=1600, height=900, scale=SCALE
+    )
 
     # --- 2) 2D scatter embedding with circles ---
     if "embedding_x" not in df_plot.columns or "embedding_y" not in df_plot.columns:
-        logger.warning("No embedding_x / embedding_y columns found; skipping cluster scatter plot.")
+        logger.warning(
+            "No embedding_x / embedding_y columns found; skipping cluster scatter plot."
+        )
         return
 
     df_emb = df_plot.dropna(subset=["embedding_x", "embedding_y"]).copy()
     if df_emb.empty:
-        logger.warning("Embedding columns are empty; skipping cluster scatter plot.")
+        logger.warning(
+            "Embedding columns are empty; skipping cluster scatter plot."
+        )
         return
 
-    # Scatter of videos in 2D embedding space
     fig = px.scatter(
         df_emb,
         x="embedding_x",
         y="embedding_y",
         color="cluster",
         hover_data=["video_id", "title", "language", "views", "duration_minutes"],
-        title="ASMR video clusters (2D embedding of text, duration, engagement, language)",
+        title="",
         labels={
             "embedding_x": "Embedding axis 1 (text + duration + engagement + language)",
             "embedding_y": "Embedding axis 2 (text + duration + engagement + language)",
@@ -1049,7 +1330,6 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
         },
     )
 
-    # Add circles around each cluster (based on centroid + radius)
     shapes = []
     for cluster_id, group in df_emb.groupby("cluster"):
         if len(group) < 2:
@@ -1061,7 +1341,6 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
             (group["embedding_x"] - cx) ** 2 + (group["embedding_y"] - cy) ** 2
         )
 
-        # Use 80th percentile as a "cluster radius"
         radius = float(distances.quantile(0.8))  # type: ignore
         if not np.isfinite(radius) or radius <= 0:
             continue
@@ -1083,7 +1362,10 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame) -> None:
     if shapes:
         fig.update_layout(shapes=shapes)
 
-    save_plotly_figure(fig, "cluster_scatter_embedding", width=1600, height=900, scale=SCALE)
+    save_plotly_figure(
+        fig, "cluster_scatter_embedding", width=1600, height=900, scale=SCALE
+    )
+
 
 # ---------------------------------------------------------------------------
 # Analytics pipeline: CSVs + figures
@@ -1154,8 +1436,12 @@ def run_analytics_pipeline(data: Dict[str, Any]) -> None:
     # Theme trends over time
     for theme in ["has_no_talking", "has_binaural"]:
         if theme in df.columns:
-            trend_all = compute_theme_trend_over_time(df, theme_col=theme, by_language=False)
-            trend_lang = compute_theme_trend_over_time(df, theme_col=theme, by_language=True)
+            trend_all = compute_theme_trend_over_time(
+                df, theme_col=theme, by_language=False
+            )
+            trend_lang = compute_theme_trend_over_time(
+                df, theme_col=theme, by_language=True
+            )
 
             trend_all.to_csv(
                 os.path.join(analysis_dir, f"{theme}_trend_overall.csv"),
@@ -1186,10 +1472,14 @@ def run_analytics_pipeline(data: Dict[str, Any]) -> None:
     )
     plot_cluster_distribution(clustered_df)
 
-    logger.info("Analytics pipeline complete. CSVs and figures written to %s", analysis_dir)
+    logger.info(
+        "Analytics pipeline complete. CSVs and figures written to %s",
+        analysis_dir,
+    )
+
 
 # ============================================================================
-# MAIN — run wordclouds + analytics
+# MAIN — run wordclouds + analytics + spaCy keyword bar plot
 # ============================================================================
 
 
@@ -1201,6 +1491,19 @@ def main() -> None:
 
     # 1) Original wordcloud pipeline.
     run_wordcloud_pipeline(data)
+
+    # 1b) spaCy keyword barplot: drive / whisper / barber / etc.
+    keyword_df = compute_spacy_keyword_counts(
+        data,
+        target_lemmas={"drive", "whisper", "barber", "doctor", "haircut", "music", "love"},
+        source="both",
+        model_name="en_core_web_sm",
+    )
+    plot_spacy_keyword_bar(
+        keyword_df,
+        title="",
+        filename="spacy_drive_whisper_barber",
+    )
 
     # 2) Analytics & clustering + figures.
     run_analytics_pipeline(data)
