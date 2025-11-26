@@ -35,6 +35,7 @@ Expected JSON structure (input and output):
 
 Design goals:
     * Only hit pytubefix / YouTube API when needed (missing fields or refresh flags).
+    * Skip updating any value that is already present unless the relevant flag is True.
     * Cache channel statistics per channel ID to avoid repeated calls.
     * Stop calling the channel stats API for this run if quotaExceeded occurs.
     * Play nicely with your CustomLogger (no dangerous `{}` in log messages).
@@ -45,7 +46,7 @@ Configuration:
     * Google API key is fetched via `common.get_secrets("google-api-key")`.
 
 Author:
-    Shadab Alam <shaadalam.5u@gmail.com>
+    Shadab Alam <md_shadab_alam@outlook.com>
 """
 
 from __future__ import annotations
@@ -88,8 +89,13 @@ class JSONMetadataEnricher:
             encountered, to avoid further failing calls this run.
     """
 
-    def __init__(self, api_key: Optional[str], json_path: str, update_views_likes: bool = False,
-                 force_refresh_channel_avg: bool = False) -> None:
+    def __init__(
+        self,
+        api_key: Optional[str],
+        json_path: str,
+        update_views_likes: bool = False,
+        force_refresh_channel_avg: bool = False,
+    ) -> None:
         """Initialize JSONMetadataEnricher.
 
         Args:
@@ -171,12 +177,13 @@ class JSONMetadataEnricher:
         return None
 
     def _is_missing(self, val: Any) -> bool:
-        """Check whether a metadata value should be considered missing."""
-        if val is None:
-            return True
-        if isinstance(val, str) and val.strip() == "":
-            return True
-        return False
+        """Check whether a metadata value should be considered missing.
+
+        A field is considered missing only if it is None (or absent in the dict).
+        Any existing value (including an empty string or 0) is treated as "present"
+        and will not be updated unless an explicit refresh flag is used.
+        """
+        return val is None
 
     # -------------------------------------------------------------------------
     # Channel statistics helper
@@ -364,76 +371,124 @@ class JSONMetadataEnricher:
     # -------------------------------------------------------------------------
     def _enrich_single_video(self, video_id: str, meta: Dict[str, Any]) -> None:
         """Enrich a single video's metadata in-place."""
-        # Fields that, if missing, justify a pytubefix metadata fetch.
-        base_fields = ("uploadDate", "language", "description", "title", "channelId", "author")
+        # --- precompute "missing" status for all relevant fields ---
+        missing_uploadDate = self._is_missing(meta.get("uploadDate"))
+        missing_description = self._is_missing(meta.get("description"))
+        missing_title = self._is_missing(meta.get("title"))
+        missing_channelId = self._is_missing(meta.get("channelId"))
+        missing_author = self._is_missing(meta.get("author"))
+        missing_language = self._is_missing(meta.get("language"))
+        missing_views = self._is_missing(meta.get("views"))
+        missing_likes = self._is_missing(meta.get("likes"))
+        missing_channel_avg = self._is_missing(meta.get("channel_average_views"))
 
-        need_pytube = any(self._is_missing(meta.get(field)) for field in base_fields)
+        # What needs work?
+        need_base_update = any(
+            [
+                missing_uploadDate,
+                missing_description,
+                missing_title,
+                missing_channelId,
+                missing_author,
+                missing_language,
+            ]
+        )
+        need_views_update = self.update_views_likes or missing_views
+        need_likes_update = self.update_views_likes or missing_likes
+        need_channel_avg_update = self.force_refresh_channel_avg or missing_channel_avg
 
-        # If we want to refresh views/likes, we will likely need metadata anyway.
-        if self.update_views_likes:
-            need_pytube = True
+        # --- fast path: if nothing needs to be updated, skip this video entirely ---
+        if not (
+            need_base_update
+            or need_views_update
+            or need_likes_update
+            or need_channel_avg_update
+        ):
+            # All relevant values are present and no refresh flags are set.
+            # Do NOT touch this entry; just move to the next one.
+            return
+
+        # --- decide if we need pytubefix at all ---
+        # We only hit pytubefix when we *really* need extra metadata:
+        #   - structural fields (uploadDate, description, title, channelId, author), or
+        #   - language when we have no text to detect from, or
+        #   - as a fallback for views/likes when the API gives nothing.
+        need_pytube_for_structure = any(
+            [
+                missing_uploadDate,
+                missing_description,
+                missing_title,
+                missing_channelId,
+                missing_author,
+            ]
+        )
+        # For language, only require pytube if language is missing AND we don't
+        # already have any text (title/description) to run langdetect on.
+        need_pytube_for_language = missing_language and (
+            missing_title or missing_description
+        )
+
+        # For stats, we'll prefer the API first; pytube is only a fallback.
+        need_stats = need_views_update or need_likes_update
+        need_pytube = need_pytube_for_structure or need_pytube_for_language
 
         extra: Dict[str, Any] = {}
         if need_pytube:
             extra = self._fetch_video_metadata_pytubefix(video_id)
 
-        # uploadDate
-        if self._is_missing(meta.get("uploadDate")) and extra:
+        # --- uploadDate / description / title / channelId / author ---
+        if missing_uploadDate and extra:
             meta["uploadDate"] = extra.get("uploadDate")
 
-        # description
-        if self._is_missing(meta.get("description")) and extra.get("description"):
+        if missing_description and extra.get("description") is not None:
             meta["description"] = extra.get("description")
 
-        # title
-        if self._is_missing(meta.get("title")) and extra.get("title"):
+        if missing_title and extra.get("title") is not None:
             meta["title"] = extra.get("title")
 
-        # channelId
-        if self._is_missing(meta.get("channelId")) and extra.get("channelId"):
+        if missing_channelId and extra.get("channelId") is not None:
             meta["channelId"] = extra.get("channelId")
 
-        # author
-        if self._is_missing(meta.get("author")) and extra.get("author"):
+        if missing_author and extra.get("author") is not None:
             meta["author"] = extra.get("author")
 
-        # language from extra, or detect from title+description.
-        if self._is_missing(meta.get("language")):
+        # --- language: from pytube if available, otherwise langdetect ---
+        if missing_language:
             language = None
             if extra:
                 language = extra.get("language")
+
             if not language:
                 combined_text = "{} {}".format(
                     meta.get("title", "") or "",
                     meta.get("description", "") or "",
-                )
-                language = self._detect_language(combined_text)
+                ).strip()
+                if combined_text:
+                    language = self._detect_language(combined_text)
+
             meta["language"] = language
 
-        # --- views & likes (API preferred, pytubefix as fallback) ---
-        # Decide whether we should touch views/likes.
-        if self.update_views_likes or self._is_missing(meta.get("views")):
-            new_views: Optional[int] = None
-            # Try API first
+        # --- views & likes: API preferred, pytubefix fallback; never overwrite unless flag says so ---
+        stats: Dict[str, Optional[int]] = {"views": None, "likes": None}
+        if need_stats:
             stats = self._fetch_video_stats_api(video_id)
-            new_views = stats["views"]
-            # Fallback to pytubefix metadata if API didn't give anything.
+
+        if need_views_update:
+            new_views: Optional[int] = stats.get("views")
             if new_views is None and extra:
+                # Only use pytubefix if API gave us nothing.
                 new_views = extra.get("views")
             if new_views is not None:
                 meta["views"] = new_views
 
-        if self.update_views_likes or self._is_missing(meta.get("likes")):
-            new_likes: Optional[int] = None
-            stats = self._fetch_video_stats_api(video_id)
-            new_likes = stats["likes"]
+        if need_likes_update:
+            new_likes: Optional[int] = stats.get("likes")
             if new_likes is None and extra:
                 new_likes = extra.get("likes")
             if new_likes is not None:
                 meta["likes"] = new_likes
 
-        # --- channel_average_views ---
-        # Ensure we have a channelId: may have been filled from extra.
+        # --- channel_average_views: only if missing or force_refresh_channel_avg is True ---
         channel_id = meta.get("channelId")
         if self.force_refresh_channel_avg:
             if channel_id:
@@ -441,11 +496,10 @@ class JSONMetadataEnricher:
                     channel_id
                 )
         else:
-            if "channel_average_views" not in meta or meta.get("channel_average_views") is None:
-                if channel_id:
-                    meta["channel_average_views"] = self._fetch_channel_average_views(
-                        channel_id
-                    )
+            if missing_channel_avg and channel_id:
+                meta["channel_average_views"] = self._fetch_channel_average_views(
+                    channel_id
+                )
 
     def enrich_json(self) -> None:
         """Main entry point to enrich the JSON file."""
@@ -493,9 +547,9 @@ if __name__ == "__main__":
     json_path = os.path.join(data_folder, json_filename)
 
     enricher = JSONMetadataEnricher(
-        api_key=secret_api,          # type: ignore
+        api_key=secret_api,  # type: ignore
         json_path=json_path,
-        update_views_likes=False,     # <- refresh views & likes even if present
-        force_refresh_channel_avg=False,  # <- refresh channel_average_views even if present
+        update_views_likes=False,         # set True to refresh views/likes even when present
+        force_refresh_channel_avg=False,  # set True to recompute channel_average_views even when present
     )
     enricher.enrich_json()
