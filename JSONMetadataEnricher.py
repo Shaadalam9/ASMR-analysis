@@ -179,11 +179,28 @@ class JSONMetadataEnricher:
     def _is_missing(self, val: Any) -> bool:
         """Check whether a metadata value should be considered missing.
 
-        A field is considered missing only if it is None (or absent in the dict).
-        Any existing value (including an empty string or 0) is treated as "present"
-        and will not be updated unless an explicit refresh flag is used.
+        For our purposes:
+
+          * Missing if:
+              - value is None, OR
+              - value is an empty / whitespace-only string.
+          * Present if:
+              - value is any non-empty string, or
+              - any non-None non-string (e.g., 0 for views).
+
+        This ensures:
+          - description is updated only when it's not present in a meaningful way
+            (None, key absent, or blank).
+          - description is NOT updated if it already has some text.
         """
-        return val is None
+        if val is None:
+            return True
+
+        if isinstance(val, str) and not val.strip():
+            # "" or "   " -> treat as missing
+            return True
+
+        return False
 
     # -------------------------------------------------------------------------
     # Channel statistics helper
@@ -440,6 +457,8 @@ class JSONMetadataEnricher:
         if missing_uploadDate and extra:
             meta["uploadDate"] = extra.get("uploadDate")
 
+        # Only update description when it's missing; never overwrite an existing
+        # non-empty description.
         if missing_description and extra.get("description") is not None:
             meta["description"] = extra.get("description")
 

@@ -64,7 +64,7 @@ Example:
         python main.py
 
 Author:
-    Shadab Alam <shaadalam.5u@gmail.com>
+    Shadab Alam <md_shadab_alam@outlook.com>
 """
 
 from __future__ import annotations
@@ -150,6 +150,8 @@ class ASMRFetcher:
             is encountered on channel stats.
         _pytube_disabled: Flag set to True when pytubefix hits BotDetection
             or similar fatal conditions; disables further pytubefix use this run.
+        published_before: Optional normalized RFC3339 timestamp used as
+            search 'publishedBefore' filter. If None, no date filter is applied.
     """
 
     def __init__(
@@ -160,6 +162,7 @@ class ASMRFetcher:
         results_per_page: int = 50,
         seen_file: str = "seen_video_ids.txt",
         json_output: str = "asmr_results.json",
+        published_before: Optional[str] = None,
     ) -> None:
         """Initialize ASMRFetcher."""
         self.api_key = api_key or None
@@ -182,6 +185,9 @@ class ASMRFetcher:
         logs(show_level=common.get_configs("logger_level"), show_color=True)
         self.logger = CustomLogger(__name__)
 
+        # Normalize published_before (can be None, "", "none", "YYYY-MM-DD", or RFC3339).
+        self.published_before = self._normalize_published_before(published_before)
+
         # Initialize YouTube API client only if an API key is given.
         if self.api_key:
             # cache_discovery=False silences the oauth2client<4.0 warning.
@@ -192,9 +198,19 @@ class ASMRFetcher:
                 cache_discovery=False,
             )
             self.logger.info("YouTube Data API enabled (API key provided).")
+            if self.published_before:
+                self.logger.info(
+                    f"Using publishedBefore filter: {self.published_before}",
+                )
+            else:
+                self.logger.info(
+                    "No publishedBefore filter set; fetching normally (all dates)."
+                )
         else:
             self.youtube = None
-            self.logger.info("No API key provided. Using only pytubefix Search for discovery.")
+            self.logger.info(
+                "No API key provided. Using only pytubefix Search for discovery."
+            )
 
         # Simple in-memory cache to avoid repeated channel stats calls.
         # Key: channel_id, Value: channel_average_views (float or None).
@@ -223,6 +239,34 @@ class ASMRFetcher:
             "language": None,
             "channel_average_views": None,
         }
+
+    def _normalize_published_before(
+        self, published_before: Optional[str]
+    ) -> Optional[str]:
+        """
+        Normalize a user-provided 'publishedBefore' value to RFC3339.
+
+        Rules:
+            - None, empty string, or 'none' (case-insensitive) -> None (no filter)
+            - 'YYYY-MM-DD' -> 'YYYY-MM-DDT00:00:00Z'
+            - Anything else is passed through unchanged (assumed valid RFC3339)
+
+        If this returns None, we do NOT send 'publishedBefore' to the API at all,
+        preserving the original behaviour.
+        """
+        if not published_before:
+            return None
+
+        pb = published_before.strip()
+        if not pb or pb.lower() == "none":
+            return None
+
+        # Simple YYYY-MM-DD format -> add midnight UTC.
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", pb):
+            return f"{pb}T00:00:00Z"
+
+        # Otherwise assume user gave a full RFC3339 timestamp already.
+        return pb
 
     # -------------------------------------------------------------------------
     # Duration helpers
@@ -551,13 +595,23 @@ class ASMRFetcher:
 
         for _ in range(self.max_pages):
             try:
+                # Build params dict so we only add 'publishedBefore' when non-None.
+                search_params: Dict[str, Any] = {
+                    "q": self.query,
+                    "part": "snippet",
+                    "type": "video",
+                    "maxResults": self.results_per_page,
+                    "pageToken": next_page_token,
+                    "order": "date",
+                }
+
+                # Only send 'publishedBefore' if it's actually set; this preserves
+                # the original behaviour when it's None/empty.
+                if self.published_before is not None:
+                    search_params["publishedBefore"] = self.published_before
+
                 request = self.youtube.search().list(  # type: ignore[call-arg]
-                    q=self.query,
-                    part="snippet",
-                    type="video",
-                    maxResults=self.results_per_page,
-                    pageToken=next_page_token,
-                    order="date",
+                    **search_params
                 )
                 response = request.execute()
             except Exception as exc:  # noqa: BLE001
@@ -730,16 +784,14 @@ class ASMRFetcher:
                 title = getattr(v, "title", "") or ""
             except pytube_exceptions.BotDetection:
                 self.logger.warning(
-                    "pytubefix BotDetection when accessing title for video %s; "
+                    f"pytubefix BotDetection when accessing title for video {video_id}; "
                     "disabling pytubefix Search for the rest of this run",
-                    video_id,
                 )
                 self._pytube_disabled = True
                 break
             except Exception:
                 self.logger.warning(
-                    "Failed to get title from pytubefix search result; skipping video %s",
-                    video_id,
+                    f"Failed to get title from pytubefix search result; skipping video {video_id}",
                 )
                 title = ""
 
@@ -940,6 +992,9 @@ fetcher = ASMRFetcher(
     results_per_page=50,
     seen_file="seen_video_ids.txt",
     json_output="asmr_results.json",
+    # If configs("date") is None/empty, no filter is applied.
+    # If it's "YYYY-MM-DD", videos before that date are fetched.
+    published_before=common.get_configs("date"),
 )
 
 if __name__ == "__main__":
