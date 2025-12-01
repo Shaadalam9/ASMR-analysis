@@ -72,6 +72,7 @@ from __future__ import annotations
 import json
 import os
 import re
+import random
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -151,19 +152,12 @@ class ASMRFetcher:
         _pytube_disabled: Flag set to True when pytubefix hits BotDetection
             or similar fatal conditions; disables further pytubefix use this run.
         published_before: Optional normalized RFC3339 timestamp used as
-            search 'publishedBefore' filter. If None, no date filter is applied.
+            search 'publishedBefore' filter. If None, no filter is applied.
     """
 
-    def __init__(
-        self,
-        api_key: Optional[str] = None,
-        query: str = "ASMR",
-        max_pages: int = 100,
-        results_per_page: int = 50,
-        seen_file: str = "seen_video_ids.txt",
-        json_output: str = "asmr_results.json",
-        published_before: Optional[str] = None,
-    ) -> None:
+    def __init__(self, api_key: Optional[str] = None, query: str = "ASMR", max_pages: int = 100,
+                 results_per_page: int = 50, seen_file: str = "seen_video_ids.txt",
+                 json_output: str = "asmr_results.json", published_before: Optional[str] = None) -> None:
         """Initialize ASMRFetcher."""
         self.api_key = api_key or None
         self.query = query
@@ -240,9 +234,7 @@ class ASMRFetcher:
             "channel_average_views": None,
         }
 
-    def _normalize_published_before(
-        self, published_before: Optional[str]
-    ) -> Optional[str]:
+    def _normalize_published_before(self, published_before: Optional[str]) -> Optional[str]:
         """
         Normalize a user-provided 'publishedBefore' value to RFC3339.
 
@@ -267,6 +259,68 @@ class ASMRFetcher:
 
         # Otherwise assume user gave a full RFC3339 timestamp already.
         return pb
+
+    def _parse_iso_like_datetime(self, value: str):
+        """
+        Parse an ISO-ish datetime string into a datetime object.
+
+        Accepts forms like:
+            - 'YYYY-MM-DD'
+            - 'YYYY-MM-DDTHH:MM:SS'
+            - 'YYYY-MM-DDTHH:MM:SSZ'
+            - 'YYYY-MM-DDTHH:MM:SS+00:00'
+
+        Returns None if parsing fails.
+        """
+        if not value:
+            return None
+
+        try:
+            import datetime
+
+            s = str(value).strip()
+            # Normalize trailing 'Z' to '+00:00' so fromisoformat can handle it.
+            if s.endswith("Z"):
+                s = s[:-1] + "+00:00"
+
+            # If it's just a date, fromisoformat still works.
+            return datetime.datetime.fromisoformat(s)
+        except Exception:
+            return None
+
+    def _passes_published_before(self, upload_date: Optional[str]) -> bool:
+        """
+        Return True if the video with the given upload_date should be kept
+        under the current published_before filter.
+
+        Semantics:
+            - If no published_before is set -> always True.
+            - If upload_date is missing or unparsable -> keep it (fail open).
+            - Otherwise: keep only if upload_date < published_before.
+        """
+        if self.published_before is None:
+            return True
+
+        if not upload_date:
+            # If we don't know the upload date, don't drop it just based on that.
+            return True
+
+        import datetime
+
+        pb_dt = self._parse_iso_like_datetime(self.published_before)
+        up_dt = self._parse_iso_like_datetime(upload_date)
+
+        if pb_dt is None or up_dt is None:
+            # Can't compare reliably -> keep it.
+            return True
+
+        # Compare as naive UTC datetimes.
+        if pb_dt.tzinfo is not None:
+            pb_dt = pb_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if up_dt.tzinfo is not None:
+            up_dt = up_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+
+        return up_dt < pb_dt
 
     # -------------------------------------------------------------------------
     # Duration helpers
@@ -581,12 +635,14 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Discovery via YouTube Data API
     # -------------------------------------------------------------------------
-    def _discover_with_api(
-        self,
-        seen_ids_set: set[str],
-        seen_ids_list: List[str],
-    ) -> List[Dict[str, Any]]:
-        """Discover new relevant videos using the YouTube Data API."""
+    def _discover_with_api(self, seen_ids_set: set[str], seen_ids_list: List[str]) -> List[Dict[str, Any]]:
+        """Discover new relevant videos using the YouTube Data API.
+
+        Results are NOT forced to be ordered by publication date; we rely on
+        the default ordering (relevance) and shuffle on our side to approximate
+        randomness. We also enforce the published_before cutoff at the
+        application level.
+        """
         if self.youtube is None:
             return []
 
@@ -601,9 +657,12 @@ class ASMRFetcher:
                     "part": "snippet",
                     "type": "video",
                     "maxResults": self.results_per_page,
-                    "pageToken": next_page_token,
-                    "order": "date",
+                    # NOTE: we intentionally do NOT set 'order' here.
+                    # Default is 'relevance', not publication date.
                 }
+
+                if next_page_token:
+                    search_params["pageToken"] = next_page_token
 
                 # Only send 'publishedBefore' if it's actually set; this preserves
                 # the original behaviour when it's None/empty.
@@ -675,6 +734,10 @@ class ASMRFetcher:
                 upload_date_meta = meta.get("uploadDate")
                 final_upload_date = upload_date_api or upload_date_meta
 
+                # Enforce published_before at application level as well.
+                if not self._passes_published_before(final_upload_date):
+                    continue
+
                 # Prefer API language field, fall back to pytubefix / detected language.
                 meta_language = meta.get("language")
                 final_language = default_lang or meta_language
@@ -711,18 +774,19 @@ class ASMRFetcher:
                 break
 
         self.logger.info(
-            "[API] Found {} new non-short relevant videos.".format(len(new_items))
+            "[API] Found {} new non-short relevant videos before shuffling.".format(
+                len(new_items)
+            )
         )
+        # Shuffle to avoid any implicit ordering (e.g., relevance ranking).
+        random.shuffle(new_items)
         return new_items
 
     # -------------------------------------------------------------------------
     # Discovery via pytubefix Search
     # -------------------------------------------------------------------------
-    def _discover_with_pytubefix_search(
-        self,
-        seen_ids_set: set[str],
-        seen_ids_list: List[str],
-    ) -> List[Dict[str, Any]]:
+    def _discover_with_pytubefix_search(self, seen_ids_set: set[str],
+                                        seen_ids_list: List[str]) -> List[Dict[str, Any]]:
         """Discover new relevant videos using pytubefix contrib Search."""
         if self._pytube_disabled:
             self.logger.info(
@@ -819,6 +883,11 @@ class ASMRFetcher:
             ):
                 continue
 
+            # Enforce published_before for pytubefix results as well.
+            upload_date = meta.get("uploadDate")
+            if not self._passes_published_before(upload_date):
+                continue
+
             # Channel average views via API, if possible (cached).
             channel_id = meta.get("channelId")
             if channel_id:
@@ -840,17 +909,19 @@ class ASMRFetcher:
                     "views": meta.get("views"),
                     "likes": meta.get("likes"),
                     "description": meta.get("description"),
-                    "uploadDate": meta.get("uploadDate"),
+                    "uploadDate": upload_date,
                     "language": meta.get("language"),
                     "channel_average_views": channel_avg_views,
                 }
             )
 
         self.logger.info(
-            "[pytubefix Search] Found {} new non-short relevant videos.".format(
+            "[pytubefix Search] Found {} new non-short relevant videos before shuffling.".format(
                 len(new_items)
             )
         )
+        # Shuffle to avoid returning always the same most "relevant" set first.
+        random.shuffle(new_items)
         return new_items
 
     # -------------------------------------------------------------------------
