@@ -108,29 +108,38 @@ Configuration of the project needs to be defined in `config`. Please use the `de
 - **`logger_level`**: Level of console output. Can be: debug, info, warning, error.
 
 ### Results
+
 ### Word clouds
 
-[![Word cloud of ASMR video titles](figures/wordcloud_titles.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_titles.html)  
+[![Word cloud of ASMR video titles](figures/wordcloud_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_title.html)  
 Word cloud of ASMR video titles, generated from the collected dataset. More frequent terms appear larger, highlighting common themes and patterns in how creators title their ASMR videos.
 
-[![Word cloud of ASMR video descriptions](figures/wordcloud_descriptions.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_descriptions.html)  
+[![Word cloud of ASMR video descriptions](figures/wordcloud_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_description.html)  
 Word cloud of ASMR video descriptions, showing the most frequent terms used in the textual descriptions accompanying ASMR videos. This highlights how creators describe, contextualize, and promote their content.
 
-[![Word cloud of ASMR video titles and descriptions](figures/wordcloud_titles_descriptions.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_titles_descriptions.html)  
+[![Word cloud of ASMR video titles and descriptions](figures/wordcloud_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_both.html)  
 Combined word cloud of ASMR video titles and descriptions, offering a holistic view of the most frequent terms across both fields. The visualization summarizes the overarching themes and stylistic patterns in the dataset.
 
 ---
 
-### Duration vs popularity and engagement
+### Keyword frequencies (spaCy lemmas)
 
-[![Mean views by duration bucket](figures/duration_mean_views.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_mean_views.html)  
-Mean number of views per video, grouped by duration bucket (short, normal, long, other). This figure addresses whether longer ASMR sessions tend to attract more total views.
+[![Top spaCy keyword lemmas](figures/spacy_keywords_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/spacy_keywords_both.html)  
+Bar chart of the most frequent content lemmas (after stopword removal), computed with spaCy. Each bar shows in how many videos a lemma appears at least once, providing a complementary, more linguistically grounded view to the word clouds.
 
-[![Mean views per day by duration bucket](figures/duration_mean_views_per_day.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_mean_views_per_day.html)  
-Mean views per day since upload, grouped by duration bucket. This captures *growth speed* and shows whether shorter or longer ASMR videos grow faster over time.
+---
 
-[![Mean engagement rate by duration bucket](figures/duration_mean_engagement_rate.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_mean_engagement_rate.html)  
-Mean engagement rate (likes / views) by duration bucket, exploring whether viewer engagement is higher for short videos, “normal” videos, or very long ASMR sessions.
+### Duration vs popularity
+
+[![Duration vs views (log–log)](figures/duration_vs_views.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_vs_views.html)  
+Log–log scatter plot of video duration (in seconds) versus total views. Each point is a video. This figure shows whether longer ASMR videos systematically attract more views or whether extremely short/long videos behave differently from “typical” lengths.
+
+---
+
+### Distribution of popularity (log-normality check)
+
+[![Q–Q plot of log10(views)](figures/log_views_qq_plot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/log_views_qq_plot.html)  
+Q–Q plot comparing the empirical distribution of \(\log_{10}(\text{views})\) against a theoretical normal distribution. Points close to the dashed line indicate that a log-normal model is a reasonable approximation for view counts; systematic deviations highlight heavy tails or skew.
 
 ---
 
@@ -168,6 +177,9 @@ Distribution of views per day for sleep-oriented ASMR videos compared to non-sle
 [![Views per day distribution for binaural videos](figures/has_binaural_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_views_per_day_boxplot.html)  
 Distribution of views per day for videos mentioning “binaural” or related keywords versus other videos, exploring whether binaural setups are associated with different growth rates.
 
+[![Views per day distribution for “drive” videos](figures/has_drive_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_drive_views_per_day_boxplot.html)  
+Distribution of views per day for “drive” / driving-themed ASMR videos compared to other content. This figure explores whether in-car / driving ASMR behaves differently in terms of growth.
+
 ---
 
 ### Community growth over time
@@ -182,34 +194,37 @@ Yearly counts of ASMR uploads by language (for languages with enough data). This
 
 ### Theme trends over time
 
-[![Share of no-talking videos over time](figures/has_no_talking_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_overall_fig.html)  
-Share of videos tagged as “no talking” (or similar) over time, aggregated across all languages. This shows whether no-talking ASMR has become more or less prevalent.
+[![Number of no-talking videos over time](figures/has_no_talking_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_overall_fig.html)  
+Number of videos tagged as “no talking” (or similar) per year, aggregated across all languages. This shows whether no-talking ASMR has become more or less prevalent over time.
 
-[![Share of no-talking videos over time by language](figures/has_no_talking_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_by_language_fig.html)  
-Share of “no talking” ASMR videos over time, broken down by language. This highlights cross-lingual differences in the adoption of no-talking formats.
+[![Number of no-talking videos over time by language](figures/has_no_talking_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_by_language_fig.html)  
+Number of “no talking” ASMR videos per year, broken down by language. This highlights cross-lingual differences in the adoption of no-talking formats.
 
-[![Share of binaural videos over time](figures/has_binaural_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_overall_fig.html)  
-Share of videos with “binaural” (and related) keywords over time, aggregated across languages. This plot reveals when binaural ASMR started to gain traction and how its prevalence has evolved.
+[![Number of binaural videos over time](figures/has_binaural_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_overall_fig.html)  
+Number of videos with “binaural” (and related) keywords per year, aggregated across languages. This plot reveals when binaural ASMR started to gain traction and how its prevalence has evolved.
 
-[![Share of binaural videos over time by language](figures/has_binaural_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_by_language_fig.html)  
-Share of binaural ASMR videos over time, broken down by language, illustrating how different language communities adopted binaural production techniques.
+[![Number of binaural videos over time by language](figures/has_binaural_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_by_language_fig.html)  
+Number of binaural ASMR videos per year, broken down by language, illustrating how different language communities adopted binaural production techniques.
 
----
-
-### Seasonal patterns
-
-[![Seasonal pattern of sleep videos](figures/sleep_seasonal_pattern_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/sleep_seasonal_pattern_fig.html)  
-Share of ASMR videos tagged as “sleep” across seasons (winter, spring, summer, autumn). This figure tests whether sleep-focused ASMR is more common in particular times of the year.
+[![Number of drive-themed videos over time](figures/drive_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/drive_trend_overall_fig.html)  
+Number of videos whose text mentions “drive” (lemma-based) per year. This captures the rise (or lack thereof) of driving-themed ASMR content over time.
 
 ---
 
-### Clustering of ASMR videos
+### Clustering of ASMR videos (PCA embedding)
 
-[![Cluster sizes](figures/cluster_sizes.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes.html)  
-Number of videos per cluster, where clusters are derived from title+description text, duration, engagement metrics, and language. This shows how the ASMR corpus is partitioned into natural content groups.
+[![Cluster sizes (PCA)](figures/cluster_sizes_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_pca.html)  
+Number of videos per cluster, where clusters are derived from title+description text, duration, engagement metrics, and language. This shows how the ASMR corpus is partitioned into natural content groups (PCA-based embedding).
 
-[![Mean views per day by cluster](figures/cluster_mean_views_per_day.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day.html)  
-Mean views per day for each cluster, comparing typical growth rates across the discovered ASMR content clusters.
+[![Mean views per day by cluster (PCA)](figures/cluster_mean_views_per_day_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_pca.html)  
+Mean views per day for each cluster (PCA-based clustering), comparing typical growth rates across the discovered ASMR content clusters.
 
-[![2D embedding of ASMR video clusters](figures/cluster_scatter_embedding.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding.html)  
-2D embedding of ASMR videos based on title+description text, duration, engagement metrics, and language, with colors indicating clusters and dotted circles roughly outlining each cluster’s region. This offers an interpretable map of the ASMR content landscape.
+[![2D PCA embedding of ASMR video clusters](figures/cluster_scatter_embedding_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_pca.html)  
+2D PCA embedding of ASMR videos based on title+description text, duration, engagement metrics, and language, with colors indicating clusters and dotted circles roughly outlining each cluster’s region. This offers an interpretable map of the ASMR content landscape.
+
+---
+
+### Alternative t-SNE embedding of clusters
+
+[![2D t-SNE embedding of ASMR video clusters](figures/cluster_scatter_embedding_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_tsne.html)  
+2D t-SNE embedding of the same clustered videos, providing an alternative nonlinear view of the ASMR content space. Compared to PCA, t-SNE can highlight tighter local groupings at the cost of less interpretable global geometry.

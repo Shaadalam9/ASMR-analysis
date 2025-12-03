@@ -214,3 +214,6 @@ secret
 # Data folders
 data
 _output
+
+# Debugging files
+check.py

@@ -6,54 +6,24 @@ YouTube video metadata keyed by videoId.
 
 It will:
     * Load the JSON file.
+    * Sync with a 'seen_videos_id.txt' file:
+        - For IDs present in the txt but missing in JSON:
+            * Try to fetch metadata and create new JSON entries.
+            * If the video is no longer available, remove it from the txt
+              (but never remove if the video already exists in JSON).
     * For each video entry:
         - Add / fix `uploadDate` if missing or null.
         - Add / fix `language` using langdetect (fallback).
         - Add / fix `channel_average_views` using the YouTube Data API.
         - Optionally refresh `views` and `likes` (API + pytubefix).
     * Write the updated JSON back to disk (by default in-place).
-
-Expected JSON structure (input and output):
-
-    {
-        "<videoId>": {
-            "title": "...",
-            "duration": 1234,
-            "channelId": "...",
-            "author": "...",
-            "views": 12345,
-            "likes": 678,
-            "description": "...",
-
-            // New/updated fields:
-            "uploadDate": "2025-01-01T12:34:56Z",
-            "language": "en",
-            "channel_average_views": 125000.0
-        },
-        ...
-    }
-
-Design goals:
-    * Only hit pytubefix / YouTube API when needed (missing fields or refresh flags).
-    * Skip updating any value that is already present unless the relevant flag is True.
-    * Cache channel statistics per channel ID to avoid repeated calls.
-    * Stop calling the channel stats API for this run if quotaExceeded occurs.
-    * Play nicely with your CustomLogger (no dangerous `{}` in log messages).
-
-Configuration:
-    * `common.get_configs("data")` provides the data folder.
-    * JSON filename is configurable; defaults to "asmr_results.json".
-    * Google API key is fetched via `common.get_secrets("google-api-key")`.
-
-Author:
-    Shadab Alam <md_shadab_alam@outlook.com>
 """
 
 from __future__ import annotations
 
 import json
 import os
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, Tuple
 
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
@@ -68,48 +38,20 @@ DetectorFactory.seed = 0
 
 
 class JSONMetadataEnricher:
-    """Enrich existing JSON metadata with uploadDate, language, views, likes, and channel_average_views.
+    """Enrich existing JSON metadata with uploadDate, language, views, likes, and channel_average_views."""
 
-    This class:
-      * Loads a JSON file (dict keyed by videoId).
-      * For each video:
-          - Fetches uploadDate, language, and channel_average_views (when possible).
-          - Optionally refreshes views and likes.
-          - Updates only missing/empty fields by default, unless flags say otherwise.
-      * Writes the updated JSON file back to disk.
-
-    Attributes:
-        json_path: Full path to the JSON file to update.
-        youtube: YouTube Data API client or None if no API key is set.
-        logger: Custom logger instance for structured logging.
-        update_views_likes: If True, refresh views/likes even if they are present.
-        force_refresh_channel_avg: If True, recompute channel_average_views even if present.
-        _channel_stats_cache: In-memory cache for channel statistics lookups.
-        _channel_stats_quota_exceeded: Flag set to True once quotaExceeded is
-            encountered, to avoid further failing calls this run.
-    """
-
-    def __init__(
-        self,
-        api_key: Optional[str],
-        json_path: str,
-        update_views_likes: bool = False,
-        force_refresh_channel_avg: bool = False,
-    ) -> None:
-        """Initialize JSONMetadataEnricher.
-
-        Args:
-            api_key: YouTube API key. If None or empty, channel_average_views
-                and API-based views/likes will not be populated.
-            json_path: Path to the JSON file to enrich.
-            update_views_likes: If True, update views/likes even when they exist.
-            force_refresh_channel_avg: If True, recompute channel_average_views
-                even when it exists.
-        """
+    def __init__(self, api_key: Optional[str], json_path: str, update_views_likes: bool = False,
+                 force_refresh_channel_avg: bool = False) -> None:
+        """Initialize JSONMetadataEnricher."""
         self.json_path = json_path
         self.api_key = api_key or None
         self.update_views_likes = update_views_likes
         self.force_refresh_channel_avg = force_refresh_channel_avg
+
+        # NEW: path to the seen_videos_id.txt file (same folder as JSON)
+        self.seen_videos_path = os.path.join(
+            os.path.dirname(self.json_path), "seen_videos_id.txt"
+        )
 
         # Initialize logging.
         logs(show_level=common.get_configs("logger_level"), show_color=True)
@@ -126,7 +68,6 @@ class JSONMetadataEnricher:
             )
 
         # In-memory cache to avoid repeated channel stats calls.
-        # Key: channel_id, Value: channel_average_views (float or None).
         self._channel_stats_cache: Dict[str, Optional[float]] = {}
 
         # Flag: once quotaExceeded happens on channel stats, stop further calls this run.
@@ -164,7 +105,7 @@ class JSONMetadataEnricher:
             return None
 
     def _normalize_int(self, val: Any) -> Optional[int]:
-        """Normalize numeric fields (views/likes) to integers when possible."""
+        """Normalize numeric fields (views/likes/duration) to integers when possible."""
         if val is None:
             return None
         if isinstance(val, int):
@@ -179,25 +120,18 @@ class JSONMetadataEnricher:
     def _is_missing(self, val: Any) -> bool:
         """Check whether a metadata value should be considered missing.
 
-        For our purposes:
-
-          * Missing if:
-              - value is None, OR
-              - value is an empty / whitespace-only string.
-          * Present if:
-              - value is any non-empty string, or
-              - any non-None non-string (e.g., 0 for views).
-
-        This ensures:
-          - description is updated only when it's not present in a meaningful way
-            (None, key absent, or blank).
-          - description is NOT updated if it already has some text.
+        By default, treat None, empty strings, and numeric 0 as missing.
+        This makes sure things like duration=0, views=0, etc. will be updated.
         """
         if val is None:
             return True
 
+        # numeric 0 (int/float) is treated as missing
+        if isinstance(val, (int, float)) and val == 0:
+            return True
+
+        # empty or whitespace-only strings are missing
         if isinstance(val, str) and not val.strip():
-            # "" or "   " -> treat as missing
             return True
 
         return False
@@ -291,7 +225,7 @@ class JSONMetadataEnricher:
     # pytubefix metadata helper
     # -------------------------------------------------------------------------
     def _fetch_video_metadata_pytubefix(self, video_id: str) -> Dict[str, Any]:
-        """Fetch video metadata via pytubefix (uploadDate, language, views, likes, etc.)."""
+        """Fetch video metadata via pytubefix (uploadDate, language, views, likes, duration, etc.)."""
         url = f"https://www.youtube.com/watch?v={video_id}"
 
         try:
@@ -309,7 +243,72 @@ class JSONMetadataEnricher:
                 "author": None,
                 "views": None,
                 "likes": None,
+                "duration": None,
             }
+
+        title = getattr(yt, "title", None)
+        description = getattr(yt, "description", None)
+        publish_raw = getattr(yt, "publish_date", None)
+        channel_id = getattr(yt, "channel_id", None)
+        author = getattr(yt, "author", None)
+        views_raw = getattr(yt, "views", None)
+        likes_raw = getattr(yt, "likes", None)
+        length_raw = getattr(yt, "length", None)
+
+        upload_date = self._normalize_upload_date(publish_raw)
+        combined_text = f"{title or ''} {description or ''}"
+        language = self._detect_language(combined_text)
+        views = self._normalize_int(views_raw)
+        likes = self._normalize_int(likes_raw)
+        duration = self._normalize_int(length_raw)
+
+        return {
+            "uploadDate": upload_date,
+            "language": language,
+            "description": description,
+            "title": title,
+            "channelId": channel_id,
+            "author": author,
+            "views": views,
+            "likes": likes,
+            "duration": duration,
+        }
+
+    # NEW: dedicated helper for *new* IDs from seen_videos_id.txt
+    def _try_fetch_new_video_metadata(self, video_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
+        """Fetch metadata for a new videoId, and detect if it's no longer available.
+
+        Returns:
+            (meta, unavailable_flag)
+            meta: dict with metadata if successful, else None.
+            unavailable_flag: True if we are confident the video is no longer available.
+        """
+        url = f"https://www.youtube.com/watch?v={video_id}"
+
+        try:
+            yt = YouTube(url)
+        except Exception as exc:  # noqa: BLE001
+            msg = str(exc)
+            # Heuristic: treat typical VideoUnavailable messages as "no longer available".
+            unavailable = (
+                "VideoUnavailable" in msg
+                or "This video is unavailable" in msg
+                or "This video is private" in msg
+                or "404" in msg
+            )
+            if unavailable:
+                self.logger.info(
+                    "Video {} appears to be unavailable or private; will remove from seen_videos.".format(
+                        video_id
+                    )
+                )
+            else:
+                self.logger.warning(
+                    "Failed to fetch metadata for new video {} (transient error?); keeping it in seen_videos.".format(
+                        video_id
+                    )
+                )
+            return None, unavailable
 
         title = getattr(yt, "title", None)
         description = getattr(yt, "description", None)
@@ -325,7 +324,7 @@ class JSONMetadataEnricher:
         views = self._normalize_int(views_raw)
         likes = self._normalize_int(likes_raw)
 
-        return {
+        meta = {
             "uploadDate": upload_date,
             "language": language,
             "description": description,
@@ -334,7 +333,9 @@ class JSONMetadataEnricher:
             "author": author,
             "views": views,
             "likes": likes,
+            # duration will be fetched later if needed
         }
+        return meta, False
 
     # -------------------------------------------------------------------------
     # JSON load/save
@@ -384,6 +385,104 @@ class JSONMetadataEnricher:
         self.logger.info("Updated JSON written to '{}'.".format(self.json_path))
 
     # -------------------------------------------------------------------------
+    # NEW: Sync JSON with seen_videos_id.txt
+    # -------------------------------------------------------------------------
+    def _sync_with_seen_videos(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Ensure JSON covers all IDs in seen_videos_id.txt, and drop truly unavailable new videos from txt.
+
+        Rules:
+            * If an ID is in seen_videos_id.txt but not in JSON:
+                - Try to fetch metadata and add it to JSON.
+                - If video is clearly unavailable, remove it from the txt.
+                - If fetch fails for uncertain reasons, keep it in txt, don't add to JSON.
+            * If an ID is already in JSON, never remove it from txt, even if unavailable.
+        """
+        if not os.path.exists(self.seen_videos_path):
+            # Nothing to sync against.
+            return
+
+        try:
+            with open(self.seen_videos_path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:  # noqa: BLE001
+            self.logger.warning(
+                "Could not read seen_videos file '{}': {}; skipping sync.".format(
+                    self.seen_videos_path, exc
+                )
+            )
+            return
+
+        seen_ids_ordered = [line.strip() for line in lines if line.strip()]
+        if not seen_ids_ordered:
+            return
+
+        json_ids = set(data.keys())
+        ids_to_remove_from_seen = set()
+
+        self.logger.info(
+            "Syncing JSON with seen_videos_id.txt: {} IDs listed, {} JSON entries.".format(
+                len(seen_ids_ordered), len(json_ids)
+            )
+        )
+
+        for vid in seen_ids_ordered:
+            if vid in json_ids:
+                # Already represented in JSON, never delete from txt.
+                continue
+
+            # vid is new (present in txt but missing in json) -> try to fetch metadata
+            meta, unavailable = self._try_fetch_new_video_metadata(vid)
+
+            if unavailable:
+                # Video appears gone; safe to drop from txt because it's not in JSON.
+                ids_to_remove_from_seen.add(vid)
+                continue
+
+            if meta is None:
+                # Some other error (network, etc.). Keep ID in txt, skip JSON insert.
+                continue
+
+            # Create a fresh metadata entry in JSON. channel_average_views will be
+            # filled later (if allowed).
+            data[vid] = {
+                "title": meta.get("title"),
+                "duration": meta.get("duration"),  # may be None; will be updated later if missing
+                "channelId": meta.get("channelId"),
+                "author": meta.get("author"),
+                "views": meta.get("views"),
+                "likes": meta.get("likes"),
+                "description": meta.get("description"),
+                "uploadDate": meta.get("uploadDate"),
+                "language": meta.get("language"),
+                "channel_average_views": None,
+            }
+            json_ids.add(vid)
+            self.logger.info(
+                "Added new video {} from seen_videos_id.txt into JSON.".format(vid)
+            )
+
+        # Rewrite seen_videos_id.txt excluding IDs we decided to remove.
+        if ids_to_remove_from_seen:
+            try:
+                with open(self.seen_videos_path, "w", encoding="utf-8") as f:
+                    for vid in seen_ids_ordered:
+                        if vid not in ids_to_remove_from_seen:
+                            f.write(vid + "\n")
+                self.logger.info(
+                    "Removed {} unavailable video IDs from '{}': {}".format(
+                        len(ids_to_remove_from_seen),
+                        self.seen_videos_path,
+                        ", ".join(sorted(ids_to_remove_from_seen)),
+                    )
+                )
+            except Exception as exc:  # noqa: BLE001
+                self.logger.warning(
+                    "Failed to update seen_videos file '{}': {}".format(
+                        self.seen_videos_path, exc
+                    )
+                )
+
+    # -------------------------------------------------------------------------
     # Enrichment logic
     # -------------------------------------------------------------------------
     def _enrich_single_video(self, video_id: str, meta: Dict[str, Any]) -> None:
@@ -398,6 +497,8 @@ class JSONMetadataEnricher:
         missing_views = self._is_missing(meta.get("views"))
         missing_likes = self._is_missing(meta.get("likes"))
         missing_channel_avg = self._is_missing(meta.get("channel_average_views"))
+        # duration is considered missing if None, empty, or 0 (handled by _is_missing)
+        missing_duration = self._is_missing(meta.get("duration"))
 
         # What needs work?
         need_base_update = any(
@@ -408,6 +509,7 @@ class JSONMetadataEnricher:
                 missing_channelId,
                 missing_author,
                 missing_language,
+                missing_duration,
             ]
         )
         need_views_update = self.update_views_likes or missing_views
@@ -421,15 +523,9 @@ class JSONMetadataEnricher:
             or need_likes_update
             or need_channel_avg_update
         ):
-            # All relevant values are present and no refresh flags are set.
-            # Do NOT touch this entry; just move to the next one.
             return
 
         # --- decide if we need pytubefix at all ---
-        # We only hit pytubefix when we *really* need extra metadata:
-        #   - structural fields (uploadDate, description, title, channelId, author), or
-        #   - language when we have no text to detect from, or
-        #   - as a fallback for views/likes when the API gives nothing.
         need_pytube_for_structure = any(
             [
                 missing_uploadDate,
@@ -437,6 +533,7 @@ class JSONMetadataEnricher:
                 missing_title,
                 missing_channelId,
                 missing_author,
+                missing_duration,
             ]
         )
         # For language, only require pytube if language is missing AND we don't
@@ -453,12 +550,10 @@ class JSONMetadataEnricher:
         if need_pytube:
             extra = self._fetch_video_metadata_pytubefix(video_id)
 
-        # --- uploadDate / description / title / channelId / author ---
+        # --- uploadDate / description / title / channelId / author / duration ---
         if missing_uploadDate and extra:
             meta["uploadDate"] = extra.get("uploadDate")
 
-        # Only update description when it's missing; never overwrite an existing
-        # non-empty description.
         if missing_description and extra.get("description") is not None:
             meta["description"] = extra.get("description")
 
@@ -470,6 +565,9 @@ class JSONMetadataEnricher:
 
         if missing_author and extra.get("author") is not None:
             meta["author"] = extra.get("author")
+
+        if missing_duration and extra.get("duration") is not None:
+            meta["duration"] = extra.get("duration")
 
         # --- language: from pytube if available, otherwise langdetect ---
         if missing_language:
@@ -495,7 +593,6 @@ class JSONMetadataEnricher:
         if need_views_update:
             new_views: Optional[int] = stats.get("views")
             if new_views is None and extra:
-                # Only use pytubefix if API gave us nothing.
                 new_views = extra.get("views")
             if new_views is not None:
                 meta["views"] = new_views
@@ -527,9 +624,12 @@ class JSONMetadataEnricher:
             self.logger.info("No data loaded. Exiting without changes.")
             return
 
+        # NEW: sync JSON with seen_videos_id.txt before enrichment
+        self._sync_with_seen_videos(data)
+
         total = len(data)
         self.logger.info(
-            "Loaded {} video entries from '{}'.".format(total, self.json_path)
+            "Loaded {} video entries from '{}' after sync.".format(total, self.json_path)
         )
 
         for idx, (video_id, meta) in enumerate(data.items(), start=1):

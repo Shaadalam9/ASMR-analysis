@@ -24,7 +24,7 @@ Key features:
     * Adds channel-level metric (when API is available):
         - channel_average_views (average views per video on that channel)
     * Ensures relevance by requiring the (case-insensitive) query keyword
-      to appear in title/description.
+      to appear in the **title**.
     * Deduplicates videos by `videoId`.
     * Persists all video metadata to a JSON file with structure:
 
@@ -56,6 +56,17 @@ Channel average views:
         - statistics.viewCount / statistics.videoCount
     * Caches per-channel results in memory (one API call per channel per run).
     * Stops calling the channels API once quota is exceeded for this run.
+
+Date filtering:
+    * Supports both publishedBefore and publishedAfter:
+        - If both are None → no date filter.
+        - If only publishedBefore → keep videos strictly before that time.
+        - If only publishedAfter → keep videos strictly after that time.
+        - If both → keep videos strictly between them.
+    * Values may be:
+        - None, empty, "none" → treated as no filter.
+        - "YYYY-MM-DD" → converted to "YYYY-MM-DDT00:00:00Z".
+        - Any other string is assumed to be RFC3339 and passed through.
 
 Example:
     To run as a script, ensure your configs and secrets are set up,
@@ -113,7 +124,7 @@ class ASMRFetcher:
       * Enriches with channel-level metric (when API is available):
           - channel_average_views
       * Ensures relevance by requiring the query keyword (case-insensitive)
-        to appear in title/description.
+        to appear in the **title**.
       * Deduplicates videos by `videoId`.
       * Stores all results in a JSON file with the structure:
 
@@ -137,7 +148,7 @@ class ASMRFetcher:
         api_key: YouTube Data API key, or None if not provided.
         query: Search query used for discovery (e.g., "ASMR", "Drive").
         query_keyword: Lowercased version of `query`, used for matching
-            in title/description.
+            in the video title.
         max_pages: Maximum pages to fetch from the YouTube API and as a
             soft cap for pytubefix Search.
         results_per_page: Results per page in the YouTube Data API.
@@ -152,12 +163,22 @@ class ASMRFetcher:
         _pytube_disabled: Flag set to True when pytubefix hits BotDetection
             or similar fatal conditions; disables further pytubefix use this run.
         published_before: Optional normalized RFC3339 timestamp used as
-            search 'publishedBefore' filter. If None, no filter is applied.
+            search 'publishedBefore' filter.
+        published_after: Optional normalized RFC3339 timestamp used as
+            search 'publishedAfter' filter.
     """
 
-    def __init__(self, api_key: Optional[str] = None, query: str = "ASMR", max_pages: int = 100,
-                 results_per_page: int = 50, seen_file: str = "seen_video_ids.txt",
-                 json_output: str = "asmr_results.json", published_before: Optional[str] = None) -> None:
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        query: str = "ASMR",
+        max_pages: int = 100,
+        results_per_page: int = 50,
+        seen_file: str = "seen_video_ids.txt",
+        json_output: str = "asmr_results.json",
+        published_before: Optional[str] = None,
+        published_after: Optional[str] = None,
+    ) -> None:
         """Initialize ASMRFetcher."""
         self.api_key = api_key or None
         self.query = query
@@ -179,8 +200,9 @@ class ASMRFetcher:
         logs(show_level=common.get_configs("logger_level"), show_color=True)
         self.logger = CustomLogger(__name__)
 
-        # Normalize published_before (can be None, "", "none", "YYYY-MM-DD", or RFC3339).
-        self.published_before = self._normalize_published_before(published_before)
+        # Normalize published_before / published_after (can be None, "", "none", "YYYY-MM-DD", or RFC3339).
+        self.published_before = self._normalize_published_bound(published_before)
+        self.published_after = self._normalize_published_bound(published_after)
 
         # Initialize YouTube API client only if an API key is given.
         if self.api_key:
@@ -192,13 +214,14 @@ class ASMRFetcher:
                 cache_discovery=False,
             )
             self.logger.info("YouTube Data API enabled (API key provided).")
-            if self.published_before:
+            if self.published_before or self.published_after:
                 self.logger.info(
-                    f"Using publishedBefore filter: {self.published_before}",
+                    f"Using date filter: published_after={self.published_after}, "
+                    f"published_before={self.published_before}"
                 )
             else:
                 self.logger.info(
-                    "No publishedBefore filter set; fetching normally (all dates)."
+                    "No date filters set; fetching normally (all dates)."
                 )
         else:
             self.youtube = None
@@ -234,31 +257,31 @@ class ASMRFetcher:
             "channel_average_views": None,
         }
 
-    def _normalize_published_before(self, published_before: Optional[str]) -> Optional[str]:
+    def _normalize_published_bound(self, value: Optional[str]) -> Optional[str]:
         """
-        Normalize a user-provided 'publishedBefore' value to RFC3339.
+        Normalize a user-provided date bound (publishedBefore/After) to RFC3339.
 
         Rules:
             - None, empty string, or 'none' (case-insensitive) -> None (no filter)
             - 'YYYY-MM-DD' -> 'YYYY-MM-DDT00:00:00Z'
             - Anything else is passed through unchanged (assumed valid RFC3339)
 
-        If this returns None, we do NOT send 'publishedBefore' to the API at all,
+        If this returns None, we do NOT send that bound to the API at all,
         preserving the original behaviour.
         """
-        if not published_before:
+        if not value:
             return None
 
-        pb = published_before.strip()
-        if not pb or pb.lower() == "none":
+        v = value.strip()
+        if not v or v.lower() == "none":
             return None
 
         # Simple YYYY-MM-DD format -> add midnight UTC.
-        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", pb):
-            return f"{pb}T00:00:00Z"
+        if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
+            return f"{v}T00:00:00Z"
 
         # Otherwise assume user gave a full RFC3339 timestamp already.
-        return pb
+        return v
 
     def _parse_iso_like_datetime(self, value: str):
         """
@@ -288,17 +311,19 @@ class ASMRFetcher:
         except Exception:
             return None
 
-    def _passes_published_before(self, upload_date: Optional[str]) -> bool:
+    def _passes_date_filter(self, upload_date: Optional[str]) -> bool:
         """
         Return True if the video with the given upload_date should be kept
-        under the current published_before filter.
+        under the current published_before / published_after filters.
 
         Semantics:
-            - If no published_before is set -> always True.
+            - If both published_before and published_after are None -> always True.
             - If upload_date is missing or unparsable -> keep it (fail open).
-            - Otherwise: keep only if upload_date < published_before.
+            - If only published_before is set -> keep if upload_date < published_before.
+            - If only published_after is set -> keep if upload_date > published_after.
+            - If both are set -> keep if published_after < upload_date < published_before.
         """
-        if self.published_before is None:
+        if self.published_before is None and self.published_after is None:
             return True
 
         if not upload_date:
@@ -307,20 +332,31 @@ class ASMRFetcher:
 
         import datetime
 
-        pb_dt = self._parse_iso_like_datetime(self.published_before)
+        pb_dt = self._parse_iso_like_datetime(self.published_before) if self.published_before else None
+        pa_dt = self._parse_iso_like_datetime(self.published_after) if self.published_after else None
         up_dt = self._parse_iso_like_datetime(upload_date)
 
-        if pb_dt is None or up_dt is None:
+        if up_dt is None:
             # Can't compare reliably -> keep it.
             return True
 
-        # Compare as naive UTC datetimes.
-        if pb_dt.tzinfo is not None:
-            pb_dt = pb_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        # Normalize to naive UTC if tz-aware.
         if up_dt.tzinfo is not None:
             up_dt = up_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if pb_dt is not None and pb_dt.tzinfo is not None:
+            pb_dt = pb_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+        if pa_dt is not None and pa_dt.tzinfo is not None:
+            pa_dt = pa_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
 
-        return up_dt < pb_dt
+        if pb_dt is None and pa_dt is not None:
+            return up_dt > pa_dt
+        if pa_dt is None and pb_dt is not None:
+            return up_dt < pb_dt
+        if pa_dt is not None and pb_dt is not None:
+            return pa_dt < up_dt < pb_dt
+
+        # Fallback: if something went weird, keep it.
+        return True
 
     # -------------------------------------------------------------------------
     # Duration helpers
@@ -623,14 +659,15 @@ class ASMRFetcher:
     # Keyword relevance helper
     # -------------------------------------------------------------------------
     def _contains_query_keyword(self, title: str, description: str = "") -> bool:
-        """Check if video content appears relevant based on the query keyword."""
+        """Check if video content appears relevant based on the query keyword.
+
+        NOTE: Only the title is checked. Description is ignored on purpose.
+        """
         if not self.query_keyword:
             # If no keyword is set, skip filtering.
             return True
 
-        blob = (title or "") + " " + (description or "")
-        blob = blob.lower()
-        return self.query_keyword in blob
+        return self.query_keyword in (title or "").lower()
 
     # -------------------------------------------------------------------------
     # Discovery via YouTube Data API
@@ -640,8 +677,8 @@ class ASMRFetcher:
 
         Results are NOT forced to be ordered by publication date; we rely on
         the default ordering (relevance) and shuffle on our side to approximate
-        randomness. We also enforce the published_before cutoff at the
-        application level.
+        randomness. We also enforce the date filters at the application level
+        as a safety net.
         """
         if self.youtube is None:
             return []
@@ -651,7 +688,7 @@ class ASMRFetcher:
 
         for _ in range(self.max_pages):
             try:
-                # Build params dict so we only add 'publishedBefore' when non-None.
+                # Build params dict so we only add date filters when non-None.
                 search_params: Dict[str, Any] = {
                     "q": self.query,
                     "part": "snippet",
@@ -664,10 +701,11 @@ class ASMRFetcher:
                 if next_page_token:
                     search_params["pageToken"] = next_page_token
 
-                # Only send 'publishedBefore' if it's actually set; this preserves
-                # the original behaviour when it's None/empty.
+                # Only send bounds if actually set; preserves old behaviour when not used.
                 if self.published_before is not None:
                     search_params["publishedBefore"] = self.published_before
+                if self.published_after is not None:
+                    search_params["publishedAfter"] = self.published_after
 
                 request = self.youtube.search().list(  # type: ignore[call-arg]
                     **search_params
@@ -724,7 +762,7 @@ class ASMRFetcher:
                 if not meta.get("duration"):
                     meta["duration"] = duration_seconds
 
-                # Relevance check, using API title and pytubefix description.
+                # Relevance check, using API title only (description optional but ignored by helper).
                 if not self._contains_query_keyword(
                     title, meta.get("description") or ""
                 ):
@@ -734,8 +772,8 @@ class ASMRFetcher:
                 upload_date_meta = meta.get("uploadDate")
                 final_upload_date = upload_date_api or upload_date_meta
 
-                # Enforce published_before at application level as well.
-                if not self._passes_published_before(final_upload_date):
+                # Enforce date filters at application level.
+                if not self._passes_date_filter(final_upload_date):
                     continue
 
                 # Prefer API language field, fall back to pytubefix / detected language.
@@ -883,9 +921,9 @@ class ASMRFetcher:
             ):
                 continue
 
-            # Enforce published_before for pytubefix results as well.
+            # Enforce date filters for pytubefix results as well.
             upload_date = meta.get("uploadDate")
-            if not self._passes_published_before(upload_date):
+            if not self._passes_date_filter(upload_date):
                 continue
 
             # Channel average views via API, if possible (cached).
@@ -1056,6 +1094,12 @@ secret = SimpleNamespace(
     API=common.get_secrets("google-api-key"),
 )
 
+# Backwards-compatible config:
+# - "date_before" takes precedence if set.
+# - "date" is treated as "date_before" if provided (legacy behaviour).
+date_before_cfg = common.get_configs("date_before") or common.get_configs("date")
+date_after_cfg = common.get_configs("date_after")
+
 fetcher = ASMRFetcher(
     api_key=secret.API,  # If this is None/empty → only pytubefix Search is used.
     query=common.get_configs("query"),
@@ -1063,9 +1107,9 @@ fetcher = ASMRFetcher(
     results_per_page=50,
     seen_file="seen_video_ids.txt",
     json_output="asmr_results.json",
-    # If configs("date") is None/empty, no filter is applied.
-    # If it's "YYYY-MM-DD", videos before that date are fetched.
-    published_before=common.get_configs("date"),
+    # If both are None/empty, no date filter is applied.
+    published_before=date_before_cfg,
+    published_after=date_after_cfg,
 )
 
 if __name__ == "__main__":
