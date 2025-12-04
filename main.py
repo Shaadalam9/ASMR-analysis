@@ -68,6 +68,19 @@ Date filtering:
         - "YYYY-MM-DD" → converted to "YYYY-MM-DDT00:00:00Z".
         - Any other string is assumed to be RFC3339 and passed through.
 
+Date windowing:
+    * Optional config `date_window_months` (integer, in months).
+    * Uses `date_before` (or legacy `date`) as global **start**.
+    * Uses `date_after` as global **end**.
+    * Splits [date_before, date_after] into consecutive month windows:
+        - Run 1:  start = date_before,   end = start + window
+        - Run 2:  start = previous end,  end = start + window
+        - ...
+        - Last run is clamped so end <= date_after.
+    * Once the start reaches or passes `date_after`, no further
+      window is produced and **no date filter is passed** (so we do
+      not “pass this date” again).
+
 Example:
     To run as a script, ensure your configs and secrets are set up,
     then:
@@ -84,6 +97,8 @@ import json
 import os
 import re
 import random
+import datetime
+import calendar
 from types import SimpleNamespace
 from typing import Any, Dict, List, Optional
 
@@ -299,8 +314,6 @@ class ASMRFetcher:
             return None
 
         try:
-            import datetime
-
             s = str(value).strip()
             # Normalize trailing 'Z' to '+00:00' so fromisoformat can handle it.
             if s.endswith("Z"):
@@ -329,8 +342,6 @@ class ASMRFetcher:
         if not upload_date:
             # If we don't know the upload date, don't drop it just based on that.
             return True
-
-        import datetime
 
         pb_dt = self._parse_iso_like_datetime(self.published_before) if self.published_before else None
         pa_dt = self._parse_iso_like_datetime(self.published_after) if self.published_after else None
@@ -436,8 +447,6 @@ class ASMRFetcher:
             return None
 
         try:
-            import datetime
-
             if isinstance(val, (datetime.date, datetime.datetime)):
                 return val.isoformat()
         except Exception:
@@ -1088,17 +1097,170 @@ class ASMRFetcher:
 
 
 # -------------------------------------------------------------------------
+# Date window helpers
+# -------------------------------------------------------------------------
+def _coerce_int(val: Any) -> Optional[int]:
+    """Best-effort conversion to int; return None if not possible."""
+    try:
+        if val is None:
+            return None
+        if isinstance(val, int):
+            return val
+        s = str(val).strip()
+        if not s:
+            return None
+        return int(s)
+    except Exception:
+        return None
+
+
+def _parse_date_only(val: Any) -> Optional[datetime.date]:
+    """
+    Parse a config date value to a datetime.date.
+
+    Accepts:
+        - 'YYYY-MM-DD'
+        - 'YYYY-MM-DDTHH:MM:SS'
+        - 'YYYY-MM-DDTHH:MM:SSZ'
+    """
+    if val is None:
+        return None
+    s = str(val).strip()
+    if not s:
+        return None
+    if "T" in s:
+        s = s.split("T", 1)[0]
+    try:
+        return datetime.date.fromisoformat(s)
+    except ValueError:
+        return None
+
+
+def _add_months(d: datetime.date, months: int) -> datetime.date:
+    """Add a number of months to a date, clamping the day to month length."""
+    month_index = (d.month - 1) + months
+    year = d.year + month_index // 12
+    month = month_index % 12 + 1
+    last_day = calendar.monthrange(year, month)[1]
+    day = min(d.day, last_day)
+    return datetime.date(year, month, day)
+
+
+def _compute_date_bounds_with_window() -> tuple[Optional[str], Optional[str], bool]:
+    """
+    Compute (date_before_cfg, date_after_cfg, window_finished) to be passed
+    into ASMRFetcher as (published_before, published_after).
+
+    Behaviour:
+        * If 'date_window_months' is not configured or <= 0:
+            - Return raw 'date_before' (or legacy 'date') and 'date_after'.
+            - window_finished = False.
+
+        * If 'date_window_months' > 0 and both 'date_before' and 'date_after'
+          are configured:
+            - Treat 'date_before'              as global START of the range.
+            - Treat 'date_after'              as global END of the range.
+            - Persist a progress file
+              '<data_folder>/date_window_state.json' with:
+                  {"next_start": "YYYY-MM-DD"}
+            - For each run:
+                current_start = max(global_start, next_start or global_start)
+                if current_start >= global_end:
+                    -> return (None, None, True)  # finished, do not pass this date
+                current_end   = min(current_start + window_months, global_end)
+                save next_start = current_end
+
+              Then:
+                date_before_cfg = current_end   (published_before)
+                date_after_cfg  = current_start (published_after)
+
+        * Once current_start reaches or passes global_end, the function
+          returns (None, None, True). The main block will then **not**
+          call fetch_asmr_videos() at all, so no date is passed to the
+          YouTube API after the configured end (honouring "Do not pass this date").
+    """
+    raw_before = common.get_configs("date_before")
+    raw_after = common.get_configs("date_after")
+    raw_window = common.get_configs("date_window_months")
+
+    window_months = _coerce_int(raw_window) or 0
+
+    # No windowing requested: keep original behaviour.
+    if window_months <= 0:
+        return raw_before, raw_after, False
+
+    # Need both bounds to build a window; otherwise fall back.
+    if not raw_before or not raw_after:
+        return raw_before, raw_after, False
+
+    global_start = _parse_date_only(raw_before)
+    global_end = _parse_date_only(raw_after)
+
+    # If parsing fails or range is invalid, keep original behaviour.
+    if not global_start or not global_end or global_start >= global_end:
+        return raw_before, raw_after, False
+
+    data_folder = common.get_configs("data") or "."
+    os.makedirs(data_folder, exist_ok=True)
+    state_path = os.path.join(data_folder, "date_window_state.json")
+
+    # Load state from previous runs (if any).
+    next_start_date: Optional[datetime.date] = None
+    if os.path.exists(state_path):
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                state_data = json.load(f)
+            stored_start = state_data.get("next_start")
+            parsed_start = _parse_date_only(stored_start)
+            if parsed_start:
+                next_start_date = parsed_start
+        except Exception:
+            next_start_date = None
+
+    # Decide where this run should start.
+    if next_start_date is None or next_start_date <= global_start:
+        current_start = global_start
+    else:
+        current_start = next_start_date
+
+    # If we've already reached or passed the global_end, we're done.
+    if current_start >= global_end:
+        # Signal: no more windows; do not pass any date filter.
+        return None, None, True
+
+    # Compute end of the current window.
+    candidate_end = _add_months(current_start, window_months)
+    if candidate_end > global_end:
+        current_end = global_end
+    else:
+        current_end = candidate_end
+
+    # Persist state for the next run: next window starts at this window's end.
+    try:
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump({"next_start": current_end.isoformat()}, f, indent=2)
+    except Exception:
+        # State persistence failure shouldn't break the current run.
+        pass
+
+    # Map to ASMRFetcher arguments:
+    #   date_before_cfg -> published_before (upper bound)
+    #   date_after_cfg  -> published_after  (lower bound)
+    date_before_cfg = current_end.isoformat()
+    date_after_cfg = current_start.isoformat()
+
+    return date_before_cfg, date_after_cfg, False
+
+
+# -------------------------------------------------------------------------
 # Standalone execution entry point
 # -------------------------------------------------------------------------
 secret = SimpleNamespace(
     API=common.get_secrets("google-api-key"),
 )
 
-# Backwards-compatible config:
-# - "date_before" takes precedence if set.
-# - "date" is treated as "date_before" if provided (legacy behaviour).
-date_before_cfg = common.get_configs("date_before") or common.get_configs("date")
-date_after_cfg = common.get_configs("date_after")
+# Determine date bounds, possibly using windowing.
+date_before_cfg, date_after_cfg, _window_finished = _compute_date_bounds_with_window()
 
 fetcher = ASMRFetcher(
     api_key=secret.API,  # If this is None/empty → only pytubefix Search is used.
@@ -1107,10 +1269,22 @@ fetcher = ASMRFetcher(
     results_per_page=50,
     seen_file="seen_video_ids.txt",
     json_output="asmr_results.json",
-    # If both are None/empty, no date filter is applied.
+    # If both are None/empty and windowing is disabled, no date filter is applied.
+    # If windowing is enabled and _window_finished is True, we won't call fetch().
     published_before=date_before_cfg,
     published_after=date_after_cfg,
 )
 
 if __name__ == "__main__":
-    fetcher.fetch_asmr_videos()
+    # If windowing is enabled and we've exhausted the configured range,
+    # do NOT call fetch_asmr_videos at all (do not pass date_after again).
+    raw_window = common.get_configs("date_window_months")
+    window_months = _coerce_int(raw_window) or 0
+
+    if window_months > 0 and _window_finished:
+        fetcher.logger.info(
+            "Date windowing: configured [date_before, date_after] range has "
+            "already been fully processed. Skipping fetch_asmr_videos() for this run."
+        )
+    else:
+        fetcher.fetch_asmr_videos()
