@@ -984,7 +984,6 @@ class ASMRFetcher:
             for key, value in item.items():
                 if key == "videoId":
                     continue
-            # include new fields
                 meta[key] = value
             combined_by_id[vid] = meta
 
@@ -1083,7 +1082,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
             - Persist a progress file
               '<data_folder>/date_window_state.json' with:
                   {"next_start": "YYYY-MM-DD"}
-            - For each run:
+            - For each run (or loop iteration):
                 current_start = max(global_start, next_start or global_start)
                 if current_start >= global_end:
                     -> return (None, None, True)
@@ -1095,8 +1094,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
                 date_after_cfg  = current_start (published_after)
 
         * Once current_start reaches or passes global_end, the function
-          returns (None, None, True). The main block will then skip
-          calling fetch_asmr_videos() (so we don't pass dates again).
+          returns (None, None, True). The caller should then stop looping.
     """
     raw_before = common.get_configs("date_before") or common.get_configs("date")
     raw_after = common.get_configs("date_after")
@@ -1104,6 +1102,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
 
     window_months = _coerce_int(raw_window) or 0
 
+    # No windowing requested → use raw dates and let caller do single run.
     if window_months <= 0:
         return raw_before, raw_after, False
 
@@ -1116,6 +1115,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
     if not d_before or not d_after:
         return raw_before, raw_after, False
 
+    # Treat the two configs as bounds, regardless of which is earlier.
     global_start = min(d_before, d_after)
     global_end = max(d_before, d_after)
 
@@ -1138,24 +1138,29 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
         except Exception:
             next_start_date = None
 
+    # Decide where this iteration should start.
     if next_start_date is None or next_start_date < global_start:
         current_start = global_start
     else:
         current_start = next_start_date
 
     if current_start >= global_end:
+        # Entire range already consumed.
         return None, None, True
 
+    # Compute end of the current window.
     candidate_end = _add_months(current_start, window_months)
     if candidate_end > global_end:
         current_end = global_end
     else:
         current_end = candidate_end
 
+    # Persist state for the next iteration: next window starts at this window's end.
     try:
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump({"next_start": current_end.isoformat()}, f, indent=2)
     except Exception:
+        # State persistence failure shouldn't break the current iteration.
         pass
 
     date_before_cfg = current_end.isoformat()
@@ -1195,39 +1200,82 @@ def _load_api_keys_from_secrets() -> List[str]:
 
 
 # -------------------------------------------------------------------------
-# Standalone execution entry point (cron-friendly, multi-key)
+# Standalone execution entry point (loop over windows until date range done)
 # -------------------------------------------------------------------------
-api_keys = _load_api_keys_from_secrets()
-
-secret = SimpleNamespace(
-    API_KEYS=api_keys,
-)
-
-date_before_cfg, date_after_cfg, window_finished = _compute_date_bounds_with_window()
-
-fetcher = ASMRFetcher(
-    api_keys=secret.API_KEYS,
-    query=common.get_configs("query"),
-    max_pages=100,
-    results_per_page=50,
-    seen_file="seen_video_ids.txt",
-    json_output="asmr_results.json",
-    published_before=date_before_cfg,
-    published_after=date_after_cfg,
-)
-
 if __name__ == "__main__":
+    api_keys = _load_api_keys_from_secrets()
+    secret = SimpleNamespace(API_KEYS=api_keys)
+
     raw_window = common.get_configs("date_window_months")
     window_months = _coerce_int(raw_window) or 0
 
-    if window_months > 0 and window_finished:
-        fetcher.logger.info(
-            "Date windowing: configured range has already been fully processed. "
-            "Skipping fetch_asmr_videos() for this run."
+    # 1) No windowing configured → behave like a simple one-shot script.
+    if window_months <= 0:
+        date_before_cfg, date_after_cfg, _ = _compute_date_bounds_with_window()
+        fetcher = ASMRFetcher(
+            api_keys=secret.API_KEYS,
+            query=common.get_configs("query"),
+            max_pages=100,
+            results_per_page=50,
+            seen_file="seen_video_ids.txt",
+            json_output="asmr_results.json",
+            published_before=date_before_cfg,
+            published_after=date_after_cfg,
         )
-    else:
         fetcher.logger.info(
-            f"Running with published_after={date_after_cfg}, "
+            f"Running single range with published_after={date_after_cfg}, "
             f"published_before={date_before_cfg}"
         )
         fetcher.fetch_asmr_videos()
+
+    # 2) Windowing configured → loop over multiple windows in one run.
+    else:
+        # First window
+        date_before_cfg, date_after_cfg, window_finished = _compute_date_bounds_with_window()
+
+        if window_finished:
+            logs(show_level=common.get_configs("logger_level"), show_color=True)
+            logger = CustomLogger(__name__)
+            logger.info(
+                "Date windowing: configured range has already been fully processed. "
+                "Nothing to do for this run."
+            )
+        else:
+            # Create one fetcher and reuse it across windows so key quota state is preserved.
+            fetcher = ASMRFetcher(
+                api_keys=secret.API_KEYS,
+                query=common.get_configs("query"),
+                max_pages=100,
+                results_per_page=50,
+                seen_file="seen_video_ids.txt",
+                json_output="asmr_results.json",
+                published_before=date_before_cfg,
+                published_after=date_after_cfg,
+            )
+
+            # Loop until all date windows are processed.
+            while True:
+                fetcher.logger.info(
+                    f"Running window with published_after={fetcher.published_after}, "
+                    f"published_before={fetcher.published_before}"
+                )
+                fetcher.fetch_asmr_videos()
+
+                # Compute next window (this advances the state file).
+                next_before, next_after, window_finished = _compute_date_bounds_with_window()
+
+                if window_finished:
+                    fetcher.logger.info(
+                        "Date windowing: configured range has now been fully processed. "
+                        "Stopping further date windows for this run."
+                    )
+                    break
+
+                # Update fetcher to the next window.
+                fetcher.published_before = fetcher._normalize_published_bound(next_before)
+                fetcher.published_after = fetcher._normalize_published_bound(next_after)
+                fetcher.logger.info(
+                    f"Updated date filter for next window: "
+                    f"published_after={fetcher.published_after}, "
+                    f"published_before={fetcher.published_before}"
+                )
