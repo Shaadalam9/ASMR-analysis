@@ -100,7 +100,7 @@ import random
 import datetime
 import calendar
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
@@ -116,76 +116,11 @@ DetectorFactory.seed = 0
 
 
 class ASMRFetcher:
-    """Fetch, enrich, and persist query-related videos from YouTube.
-
-    Despite the name, this class can fetch videos for any query, such as
-    "ASMR", "Drive", etc. It discovers videos via:
-
-    1. YouTube Data API (if an API key is provided).
-    2. pytubefix contrib Search (web scraping; no API key required).
-
-    It then:
-      * Filters out short videos (YouTube Shorts) based on duration (< 60 seconds).
-      * Enriches videos using pytubefix with:
-          - title
-          - duration
-          - channelId
-          - author
-          - views
-          - likes
-          - description
-          - uploadDate
-          - language (auto-detected if not provided by YouTube)
-      * Enriches with channel-level metric (when API is available):
-          - channel_average_views
-      * Ensures relevance by requiring the query keyword (case-insensitive)
-        to appear in the **title**.
-      * Deduplicates videos by `videoId`.
-      * Stores all results in a JSON file with the structure:
-
-        {
-            "<videoId>": {
-                "title": "...",
-                "duration": 1234,
-                "channelId": "...",
-                "author": "...",
-                "views": 12345,
-                "likes": 678,
-                "description": "...",
-                "uploadDate": "2025-01-01T12:34:56Z",
-                "language": "en",
-                "channel_average_views": 125000.0
-            },
-            ...
-        }
-
-    Attributes:
-        api_key: YouTube Data API key, or None if not provided.
-        query: Search query used for discovery (e.g., "ASMR", "Drive").
-        query_keyword: Lowercased version of `query`, used for matching
-            in the video title.
-        max_pages: Maximum pages to fetch from the YouTube API and as a
-            soft cap for pytubefix Search.
-        results_per_page: Results per page in the YouTube Data API.
-        data_folder: Directory path to hold JSON and seen-IDs file.
-        seen_file: Path to the file storing already seen video IDs (one per line).
-        json_output: Path to the JSON file storing video metadata.
-        youtube: YouTube Data API client or None if no API key is set.
-        logger: Custom logger instance for structured logging.
-        _channel_stats_cache: In-memory cache for channel statistics lookups.
-        _channel_stats_quota_exceeded: Flag set to True once quotaExceeded
-            is encountered on channel stats.
-        _pytube_disabled: Flag set to True when pytubefix hits BotDetection
-            or similar fatal conditions; disables further pytubefix use this run.
-        published_before: Optional normalized RFC3339 timestamp used as
-            search 'publishedBefore' filter.
-        published_after: Optional normalized RFC3339 timestamp used as
-            search 'publishedAfter' filter.
-    """
+    """Fetch, enrich, and persist query-related videos from YouTube."""
 
     def __init__(
         self,
-        api_key: Optional[str] = None,
+        api_keys: Optional[List[str]] = None,
         query: str = "ASMR",
         max_pages: int = 100,
         results_per_page: int = 50,
@@ -195,64 +130,130 @@ class ASMRFetcher:
         published_after: Optional[str] = None,
     ) -> None:
         """Initialize ASMRFetcher."""
-        self.api_key = api_key or None
+        # Core configs
         self.query = query
-        # Use a simple, lowercased keyword for relevance matching.
         self.query_keyword = (self.query or "").strip().lower()
-
         self.max_pages = max_pages
         self.results_per_page = results_per_page
 
-        # Resolve and ensure data folder exists.
+        # Paths
         self.data_folder = common.get_configs("data")
         os.makedirs(self.data_folder, exist_ok=True)
-
-        # Paths for metadata and seen ID tracking, both under data_folder.
         self.seen_file = os.path.join(self.data_folder, seen_file)
         self.json_output = os.path.join(self.data_folder, json_output)
 
-        # Initialize logging.
+        # Logging
         logs(show_level=common.get_configs("logger_level"), show_color=True)
         self.logger = CustomLogger(__name__)
 
-        # Normalize published_before / published_after (can be None, "", "none", "YYYY-MM-DD", or RFC3339).
+        # Date filters
         self.published_before = self._normalize_published_bound(published_before)
         self.published_after = self._normalize_published_bound(published_after)
 
-        # Initialize YouTube API client only if an API key is given.
-        if self.api_key:
-            # cache_discovery=False silences the oauth2client<4.0 warning.
+        # Multiple API keys support
+        raw_keys = api_keys or []
+        self.api_keys: List[str] = [k for k in raw_keys if k]
+        self._current_key_index: int = 0
+        self.youtube = None
+
+        # Caches / flags
+        self._channel_stats_cache: Dict[str, Optional[float]] = {}
+        self._channel_stats_quota_exceeded: bool = False
+        self._pytube_disabled: bool = False
+
+        # Initialize YouTube client (if any API key exists)
+        if self.api_keys:
+            self._init_youtube_for_current_key()
+        else:
+            self.logger.info(
+                "No YouTube Data API key provided. Using only pytubefix Search for discovery."
+            )
+
+    # -------------------------------------------------------------------------
+    # API key handling
+    # -------------------------------------------------------------------------
+    def _init_youtube_for_current_key(self) -> None:
+        """Initialize YouTube client for the current API key index."""
+        if not self.api_keys:
+            self.youtube = None
+            return
+
+        key = self.api_keys[self._current_key_index]
+        try:
             self.youtube = build(
                 "youtube",
                 "v3",
-                developerKey=self.api_key,
+                developerKey=key,
                 cache_discovery=False,
             )
-            self.logger.info("YouTube Data API enabled (API key provided).")
+            total_keys = len(self.api_keys)
+            current = self._current_key_index + 1
+            self.logger.info(
+                f"YouTube Data API enabled with {total_keys} API key(s). Using key {current}/{total_keys}."
+            )
             if self.published_before or self.published_after:
                 self.logger.info(
                     f"Using date filter: published_after={self.published_after}, "
                     f"published_before={self.published_before}"
                 )
             else:
-                self.logger.info(
-                    "No date filters set; fetching normally (all dates)."
-                )
-        else:
+                self.logger.info("No date filters set; fetching normally (all dates).")
+        except Exception:
             self.youtube = None
-            self.logger.info(
-                "No API key provided. Using only pytubefix Search for discovery."
+            idx = self._current_key_index + 1
+            self.logger.warning(
+                f"Failed to initialize YouTube Data API client for key index {idx}."
             )
+            # Try to switch to the next key immediately.
+            self._switch_to_next_api_key()
 
-        # Simple in-memory cache to avoid repeated channel stats calls.
-        # Key: channel_id, Value: channel_average_views (float or None).
-        self._channel_stats_cache: Dict[str, Optional[float]] = {}
+    def _switch_to_next_api_key(self) -> bool:
+        """
+        Rotate to the next API key.
 
-        # Flag to stop calling channel stats once quota is exceeded in this run.
-        self._channel_stats_quota_exceeded: bool = False
+        Returns True if a new key was successfully initialized,
+        False if there are no more keys or initialization fails.
+        """
+        if not self.api_keys:
+            self.youtube = None
+            return False
 
-        # Flag to stop using pytubefix once BotDetection occurs for this run.
-        self._pytube_disabled: bool = False
+        self._current_key_index += 1
+        if self._current_key_index >= len(self.api_keys):
+            self.youtube = None
+            self.logger.warning(
+                "All YouTube Data API keys have been exhausted or failed. "
+                "Continuing without Data API for the rest of this run."
+            )
+            return False
+
+        key = self.api_keys[self._current_key_index]
+        try:
+            self.youtube = build(
+                "youtube",
+                "v3",
+                developerKey=key,
+                cache_discovery=False,
+            )
+            self._channel_stats_quota_exceeded = False
+            total_keys = len(self.api_keys)
+            current = self._current_key_index + 1
+            self.logger.info(
+                f"Switched to YouTube Data API key {current}/{total_keys}."
+            )
+            if self.published_before or self.published_after:
+                self.logger.info(
+                    f"Using date filter: published_after={self.published_after}, "
+                    f"published_before={self.published_before}"
+                )
+            return True
+        except Exception:
+            idx = self._current_key_index + 1
+            self.logger.warning(
+                f"Failed to initialize YouTube Data API client for key index {idx}; trying next key."
+            )
+            # Try the next key recursively until we run out.
+            return self._switch_to_next_api_key()
 
     # -------------------------------------------------------------------------
     # Small helpers
@@ -280,9 +281,6 @@ class ASMRFetcher:
             - None, empty string, or 'none' (case-insensitive) -> None (no filter)
             - 'YYYY-MM-DD' -> 'YYYY-MM-DDT00:00:00Z'
             - Anything else is passed through unchanged (assumed valid RFC3339)
-
-        If this returns None, we do NOT send that bound to the API at all,
-        preserving the original behaviour.
         """
         if not value:
             return None
@@ -291,35 +289,23 @@ class ASMRFetcher:
         if not v or v.lower() == "none":
             return None
 
-        # Simple YYYY-MM-DD format -> add midnight UTC.
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
             return f"{v}T00:00:00Z"
 
-        # Otherwise assume user gave a full RFC3339 timestamp already.
         return v
 
     def _parse_iso_like_datetime(self, value: str):
         """
         Parse an ISO-ish datetime string into a datetime object.
-
-        Accepts forms like:
-            - 'YYYY-MM-DD'
-            - 'YYYY-MM-DDTHH:MM:SS'
-            - 'YYYY-MM-DDTHH:MM:SSZ'
-            - 'YYYY-MM-DDTHH:MM:SS+00:00'
-
-        Returns None if parsing fails.
+        Accepts 'YYYY-MM-DD', 'YYYY-MM-DDTHH:MM:SS', '...Z', etc.
         """
         if not value:
             return None
 
         try:
             s = str(value).strip()
-            # Normalize trailing 'Z' to '+00:00' so fromisoformat can handle it.
             if s.endswith("Z"):
                 s = s[:-1] + "+00:00"
-
-            # If it's just a date, fromisoformat still works.
             return datetime.datetime.fromisoformat(s)
         except Exception:
             return None
@@ -328,19 +314,11 @@ class ASMRFetcher:
         """
         Return True if the video with the given upload_date should be kept
         under the current published_before / published_after filters.
-
-        Semantics:
-            - If both published_before and published_after are None -> always True.
-            - If upload_date is missing or unparsable -> keep it (fail open).
-            - If only published_before is set -> keep if upload_date < published_before.
-            - If only published_after is set -> keep if upload_date > published_after.
-            - If both are set -> keep if published_after < upload_date < published_before.
         """
         if self.published_before is None and self.published_after is None:
             return True
 
         if not upload_date:
-            # If we don't know the upload date, don't drop it just based on that.
             return True
 
         pb_dt = self._parse_iso_like_datetime(self.published_before) if self.published_before else None
@@ -348,10 +326,8 @@ class ASMRFetcher:
         up_dt = self._parse_iso_like_datetime(upload_date)
 
         if up_dt is None:
-            # Can't compare reliably -> keep it.
             return True
 
-        # Normalize to naive UTC if tz-aware.
         if up_dt.tzinfo is not None:
             up_dt = up_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
         if pb_dt is not None and pb_dt.tzinfo is not None:
@@ -366,7 +342,6 @@ class ASMRFetcher:
         if pa_dt is not None and pb_dt is not None:
             return pa_dt < up_dt < pb_dt
 
-        # Fallback: if something went weird, keep it.
         return True
 
     # -------------------------------------------------------------------------
@@ -377,7 +352,6 @@ class ASMRFetcher:
         if iso_duration == "P0D":
             return 0
 
-        # YouTube-specific pattern (PT#H#M#S).
         yt_pattern = re.compile(
             r"^PT"
             r"(?:(\d+)H)?"
@@ -391,7 +365,6 @@ class ASMRFetcher:
             seconds = int(match.group(3) or 0)
             return hours * 3600 + minutes * 60 + seconds
 
-        # More generic ISO 8601 pattern if the above fails.
         generic_pattern = re.compile(
             r"^P"
             r"(?:(\d+)D)?"
@@ -450,7 +423,6 @@ class ASMRFetcher:
             if isinstance(val, (datetime.date, datetime.datetime)):
                 return val.isoformat()
         except Exception:
-            # Fall back to generic conversion.
             pass
 
         try:
@@ -469,7 +441,6 @@ class ASMRFetcher:
         try:
             return detect(text)
         except Exception:
-            # Detection can fail on very short or noisy text.
             return None
 
     # -------------------------------------------------------------------------
@@ -480,16 +451,13 @@ class ASMRFetcher:
         if not channel_id:
             return None
 
-        # If we've already decided not to call the API anymore this run, bail out.
         if self._channel_stats_quota_exceeded:
             return None
 
-        # Return from cache if present (even if cached None).
         if channel_id in self._channel_stats_cache:
             return self._channel_stats_cache[channel_id]
 
         if self.youtube is None:
-            # Cannot compute without YouTube Data API.
             self._channel_stats_cache[channel_id] = None
             return None
 
@@ -513,25 +481,25 @@ class ASMRFetcher:
             else:
                 avg = total_views / float(total_videos)
 
-            # Cache result (including None) so we do not refetch this run.
             self._channel_stats_cache[channel_id] = avg
             return avg
 
         except Exception as exc:  # noqa: BLE001
-            # Do NOT put exc string into the format message (it may contain braces).
+            if "quotaExceeded" in str(exc):
+                self.logger.warning(
+                    "YouTube channel statistics quota exceeded for current key."
+                )
+                # Try next key if available
+                if self._switch_to_next_api_key():
+                    return self._fetch_channel_average_views(channel_id)
+                else:
+                    self._channel_stats_quota_exceeded = True
+                    self._channel_stats_cache[channel_id] = None
+                    return None
+
             self.logger.warning(
                 "Failed to fetch channel statistics; channel_average_views will be None for this channel"
             )
-
-            # If this looks like a quotaExceeded error, remember it so we
-            # do not hammer the API with more failing requests this run.
-            if "quotaExceeded" in str(exc):
-                self._channel_stats_quota_exceeded = True
-                self.logger.warning(
-                    "YouTube channel statistics quota exceeded; "
-                    "channel_average_views will be skipped for the rest of this run"
-                )
-
             self._channel_stats_cache[channel_id] = None
             return None
 
@@ -541,14 +509,11 @@ class ASMRFetcher:
     def _fetch_video_metadata_pytubefix(self, video_id: str) -> Dict[str, Any]:
         """Fetch basic video metadata via pytubefix (defensive, BotDetection-aware)."""
         if self._pytube_disabled:
-            # We already hit BotDetection previously; don't try again this run.
             return self._empty_video_metadata()
 
-        url = "https://www.youtube.com/watch?v=" + video_id
+        url = f"https://www.youtube.com/watch?v={video_id}"
 
-        # First, try to construct the YouTube object at all.
         try:
-            # Use "WEB" client to leverage PoToken and reduce bot detection.
             yt = YouTube(url, "WEB")
         except pytube_exceptions.BotDetection:
             self.logger.warning(
@@ -563,7 +528,6 @@ class ASMRFetcher:
             )
             return self._empty_video_metadata()
 
-        # Now, be defensive when accessing properties (length can raise LiveStreamError, etc.).
         try:
             title = getattr(yt, "title", None)
             channel_id = getattr(yt, "channel_id", None)
@@ -575,7 +539,6 @@ class ASMRFetcher:
             try:
                 length_raw = getattr(yt, "length", None)
             except Exception:
-                # Live streams and some restricted videos can fail here.
                 length_raw = None
 
             publish_raw = getattr(yt, "publish_date", None)
@@ -585,7 +548,6 @@ class ASMRFetcher:
             likes = self._normalize_int(likes_raw)
             upload_date = self._normalize_upload_date(publish_raw)
 
-            # Try to detect language from title + description.
             combined_text = (title or "") + " " + (description or "")
             language = self._detect_language(combined_text)
 
@@ -610,8 +572,6 @@ class ASMRFetcher:
             self._pytube_disabled = True
             return self._empty_video_metadata()
         except Exception:
-            # Catch-all: if any property access blows up (e.g. weird edge cases),
-            # we don't want the whole pipeline to die for a single video.
             self.logger.warning(
                 "Failed to extract pytubefix metadata; using default metadata for this video"
             )
@@ -643,22 +603,18 @@ class ASMRFetcher:
         )
 
         if needs_fetch and not self._pytube_disabled:
-            # Re-fetch from pytubefix if any of the core fields are missing.
             extra = self._fetch_video_metadata_pytubefix(video_id)
             for field in required_fields:
                 if field not in meta or _is_missing(meta.get(field)):
                     meta[field] = extra.get(field)
 
-            # Only overwrite language with pytubefix-derived language if we do not have one yet.
             if not meta.get("language"):
                 meta["language"] = extra.get("language")
 
-        # Language fallback: detect from title + description if still missing.
         if not meta.get("language"):
             combined_text = (meta.get("title", "") or "") + " " + (meta.get("description", "") or "")
             meta["language"] = self._detect_language(combined_text)
 
-        # Channel average views: compute via YouTube Data API if missing and channelId is known.
         if ("channel_average_views" not in meta) or (meta.get("channel_average_views") is None):
             channel_id = meta.get("channelId")
             if channel_id:
@@ -673,22 +629,14 @@ class ASMRFetcher:
         NOTE: Only the title is checked. Description is ignored on purpose.
         """
         if not self.query_keyword:
-            # If no keyword is set, skip filtering.
             return True
-
         return self.query_keyword in (title or "").lower()
 
     # -------------------------------------------------------------------------
-    # Discovery via YouTube Data API
+    # Discovery via YouTube Data API (with multi-key rotation)
     # -------------------------------------------------------------------------
     def _discover_with_api(self, seen_ids_set: set[str], seen_ids_list: List[str]) -> List[Dict[str, Any]]:
-        """Discover new relevant videos using the YouTube Data API.
-
-        Results are NOT forced to be ordered by publication date; we rely on
-        the default ordering (relevance) and shuffle on our side to approximate
-        randomness. We also enforce the date filters at the application level
-        as a safety net.
-        """
+        """Discover new relevant videos using the YouTube Data API."""
         if self.youtube is None:
             return []
 
@@ -696,21 +644,20 @@ class ASMRFetcher:
         next_page_token: Optional[str] = None
 
         for _ in range(self.max_pages):
+            if self.youtube is None:
+                break
+
             try:
-                # Build params dict so we only add date filters when non-None.
                 search_params: Dict[str, Any] = {
                     "q": self.query,
                     "part": "snippet",
                     "type": "video",
                     "maxResults": self.results_per_page,
-                    # NOTE: we intentionally do NOT set 'order' here.
-                    # Default is 'relevance', not publication date.
                 }
 
                 if next_page_token:
                     search_params["pageToken"] = next_page_token
 
-                # Only send bounds if actually set; preserves old behaviour when not used.
                 if self.published_before is not None:
                     search_params["publishedBefore"] = self.published_before
                 if self.published_after is not None:
@@ -721,14 +668,22 @@ class ASMRFetcher:
                 )
                 response = request.execute()
             except Exception as exc:  # noqa: BLE001
-                self.logger.warning(
-                    "YouTube Data API search failed; falling back to pytubefix only for this run"
-                )
                 if "quotaExceeded" in str(exc):
                     self.logger.warning(
-                        "YouTube search quota exceeded; skipping further API search calls this run"
+                        "YouTube search quota exceeded for current key; attempting to switch API key."
                     )
-                return []
+                    if self._switch_to_next_api_key():
+                        next_page_token = None
+                        continue
+                    else:
+                        self.logger.warning(
+                            "No more API keys available; skipping further API search calls this run."
+                        )
+                        break
+                self.logger.warning(
+                    "YouTube Data API search failed; skipping further API search calls this run."
+                )
+                break
 
             for item in response.get("items", []):
                 video_id = item["id"]["videoId"]
@@ -736,23 +691,31 @@ class ASMRFetcher:
                 title = snippet["title"]
                 upload_date_api = snippet.get("publishedAt")
 
-                # YouTube snippet language fields.
                 default_lang = snippet.get("defaultAudioLanguage") or snippet.get(
                     "defaultLanguage"
                 )
 
-                # Skip if already seen.
                 if video_id in seen_ids_set:
                     continue
 
-                # Fetch duration details from YouTube Data API.
                 try:
                     details = self.youtube.videos().list(  # type: ignore[call-arg]
                         part="contentDetails",
                         id=video_id,
                     ).execute()
-                except Exception:
-                    # If duration fetch fails, skip this video.
+                except Exception as exc:  # noqa: BLE001
+                    if "quotaExceeded" in str(exc):
+                        self.logger.warning(
+                            "YouTube videos().list quota exceeded for current key; attempting to switch API key."
+                        )
+                        if self._switch_to_next_api_key():
+                            # retry this video with new key by not marking it seen
+                            continue
+                        else:
+                            self.logger.warning(
+                                "No more API keys available; stopping API discovery this run."
+                            )
+                            break
                     continue
 
                 if not details.get("items"):
@@ -762,41 +725,33 @@ class ASMRFetcher:
                 iso_duration = content_details.get("duration", "P0D")
                 duration_seconds = self._duration_to_seconds(iso_duration)
 
-                # Exclude Shorts.
                 if self._is_short_video(duration_seconds):
                     continue
 
-                # Enrich with pytubefix metadata.
                 meta = self._fetch_video_metadata_pytubefix(video_id)
                 if not meta.get("duration"):
                     meta["duration"] = duration_seconds
 
-                # Relevance check, using API title only (description optional but ignored by helper).
                 if not self._contains_query_keyword(
                     title, meta.get("description") or ""
                 ):
                     continue
 
-                # Prefer API upload date, fall back to pytubefix upload date.
                 upload_date_meta = meta.get("uploadDate")
                 final_upload_date = upload_date_api or upload_date_meta
 
-                # Enforce date filters at application level.
                 if not self._passes_date_filter(final_upload_date):
                     continue
 
-                # Prefer API language field, fall back to pytubefix / detected language.
                 meta_language = meta.get("language")
                 final_language = default_lang or meta_language
 
-                # Channel average views via stats endpoint (safe, cached).
                 channel_id = meta.get("channelId")
                 if channel_id:
                     channel_avg_views = self._fetch_channel_average_views(channel_id)
                 else:
                     channel_avg_views = None
 
-                # Mark as seen and collect.
                 seen_ids_list.append(video_id)
                 seen_ids_set.add(video_id)
 
@@ -821,11 +776,8 @@ class ASMRFetcher:
                 break
 
         self.logger.info(
-            "[API] Found {} new non-short relevant videos before shuffling.".format(
-                len(new_items)
-            )
+            f"[API] Found {len(new_items)} new non-short relevant videos before shuffling."
         )
-        # Shuffle to avoid any implicit ordering (e.g., relevance ranking).
         random.shuffle(new_items)
         return new_items
 
@@ -844,7 +796,6 @@ class ASMRFetcher:
 
         new_items: List[Dict[str, Any]] = []
 
-        # Restrict results to videos and sort by relevance.
         filters = (
             Filter.create()
             .type(Filter.Type.VIDEO)
@@ -873,14 +824,12 @@ class ASMRFetcher:
 
         for v in search_obj.videos:
             if self._pytube_disabled:
-                # BotDetection could have been triggered elsewhere mid-loop.
                 break
 
             if count >= max_results:
                 break
             count += 1
 
-            # Extract video ID from search result object or URL.
             video_id = getattr(v, "video_id", None) or getattr(v, "videoId", None)
             if not video_id:
                 watch_url = getattr(v, "watch_url", "") or ""
@@ -890,59 +839,50 @@ class ASMRFetcher:
             if not video_id or video_id in seen_ids_set:
                 continue
 
-            # Title access can trigger BotDetection via check_availability().
             try:
                 title = getattr(v, "title", "") or ""
             except pytube_exceptions.BotDetection:
                 self.logger.warning(
                     f"pytubefix BotDetection when accessing title for video {video_id}; "
-                    "disabling pytubefix Search for the rest of this run",
+                    "disabling pytubefix Search for the rest of this run"
                 )
                 self._pytube_disabled = True
                 break
             except Exception:
                 self.logger.warning(
-                    f"Failed to get title from pytubefix search result; skipping video {video_id}",
+                    f"Failed to get title from pytubefix search result; skipping video {video_id}"
                 )
                 title = ""
 
-            # Try to get duration from search object.
             try:
                 duration_seconds = int(getattr(v, "length", 0))
-            except Exception:  # noqa: BLE001
+            except Exception:
                 duration_seconds = 0
 
-            # Fetch full metadata via pytubefix to enrich.
             meta = self._fetch_video_metadata_pytubefix(video_id)
 
-            # If search didn't give a length, use pytubefix metadata duration.
             if not duration_seconds and meta.get("duration"):
                 duration_seconds = meta["duration"]
 
-            # Exclude Shorts if we have a duration.
             if duration_seconds and self._is_short_video(duration_seconds):
                 continue
 
-            # Relevance check; prefer title from either search or metadata.
             effective_title = title or meta.get("title", "") or ""
             if not self._contains_query_keyword(
                 effective_title, meta.get("description") or ""
             ):
                 continue
 
-            # Enforce date filters for pytubefix results as well.
             upload_date = meta.get("uploadDate")
             if not self._passes_date_filter(upload_date):
                 continue
 
-            # Channel average views via API, if possible (cached).
             channel_id = meta.get("channelId")
             if channel_id:
                 channel_avg_views = self._fetch_channel_average_views(channel_id)
             else:
                 channel_avg_views = None
 
-            # Mark as seen and collect.
             seen_ids_list.append(video_id)
             seen_ids_set.add(video_id)
 
@@ -963,11 +903,8 @@ class ASMRFetcher:
             )
 
         self.logger.info(
-            "[pytubefix Search] Found {} new non-short relevant videos before shuffling.".format(
-                len(new_items)
-            )
+            f"[pytubefix Search] Found {len(new_items)} new non-short relevant videos before shuffling."
         )
-        # Shuffle to avoid returning always the same most "relevant" set first.
         random.shuffle(new_items)
         return new_items
 
@@ -1002,18 +939,12 @@ class ASMRFetcher:
     # Main public method
     # -------------------------------------------------------------------------
     def fetch_asmr_videos(self) -> List[str]:
-        """Discover and enrich videos, then persist them to JSON.
-
-        The method name is historical and kept for backward compatibility; it
-        works for any query (not just ASMR).
-        """
-        # 1) Load existing videos and treat them as already known.
+        """Discover and enrich videos, then persist them to JSON."""
         existing_by_id = self._load_existing_by_id()
         existing_keys = set(existing_by_id.keys())
 
-        # 2) Load previously seen IDs from file (if present).
         seen_ids_list: List[str] = []
-        seen_ids_set: set[str] = set(existing_keys)  # Start with IDs from JSON.
+        seen_ids_set: set[str] = set(existing_keys)
 
         if os.path.exists(self.seen_file):
             with open(self.seen_file, "r", encoding="utf-8") as f:
@@ -1023,81 +954,69 @@ class ASMRFetcher:
                         seen_ids_list.append(vid)
                         seen_ids_set.add(vid)
 
-        # Ensure that all existing JSON IDs appear in the seen IDs list.
         for vid in existing_keys:
             if vid not in seen_ids_list:
                 seen_ids_list.append(vid)
 
         all_new_items: List[Dict[str, Any]] = []
 
-        # 3) Discover via YouTube Data API (if enabled).
         if self.youtube is not None:
             api_items = self._discover_with_api(seen_ids_set, seen_ids_list)
             all_new_items.extend(api_items)
 
-        # 4) Discover additional videos via pytubefix Search.
         pytube_items = self._discover_with_pytubefix_search(seen_ids_set, seen_ids_list)
         all_new_items.extend(pytube_items)
 
         self.logger.info(
-            "Total new non-short relevant videos discovered this run: {}".format(
-                len(all_new_items)
-            )
+            f"Total new non-short relevant videos discovered this run: {len(all_new_items)}"
         )
 
-        # 5) Merge existing + newly discovered, keyed by videoId.
         combined_by_id: Dict[str, Dict[str, Any]] = {}
 
-        # Start with existing metadata.
         for vid, meta in existing_by_id.items():
             combined_by_id[vid] = dict(meta) if isinstance(meta, dict) else {}
 
-        # Add or update from new items.
         for item in all_new_items:
             vid = item.get("videoId")
             if not vid:
                 continue
             meta = combined_by_id.get(vid, {})
-            # Merge fields from the newly discovered item.
             for key, value in item.items():
                 if key == "videoId":
                     continue
+            # include new fields
                 meta[key] = value
             combined_by_id[vid] = meta
 
-        # 6) Ensure metadata completeness **only for newly added videos**.
         final_keys = set(combined_by_id.keys())
         unique_new_ids = final_keys - existing_keys
         self.logger.info(
-            "Ensuring metadata for {} newly added videos".format(len(unique_new_ids))
+            f"Ensuring metadata for {len(unique_new_ids)} newly added videos"
         )
 
         for vid in unique_new_ids:
             self._ensure_metadata_for_item(vid, combined_by_id[vid])
 
-        # 7) Save merged results back to JSON in the unified format.
         with open(self.json_output, "w", encoding="utf-8") as f:
             json.dump(combined_by_id, f, indent=4, ensure_ascii=False)
 
-        # 8) Update seen IDs file with a stable order.
         with open(self.seen_file, "w", encoding="utf-8") as f:
             for vid in seen_ids_list:
                 f.write(vid + "\n")
 
         self.logger.info(
-            "Saved {} unique new entries to '{}'. Total entries stored: {}".format(
-                len(unique_new_ids), self.json_output, len(combined_by_id)
-            )
+            f"Saved {len(unique_new_ids)} unique new entries to '{self.json_output}'. "
+            f"Total entries stored: {len(combined_by_id)}"
         )
         self.logger.info(
-            "Total unique videos tracked (seen list size): {}".format(len(seen_ids_list))
+            f"Total unique videos tracked (seen list size): {len(seen_ids_list)}"
         )
 
         return list(unique_new_ids)
 
 
 # -------------------------------------------------------------------------
-# Date window helpers
+# Date window + API key loading helpers
 # -------------------------------------------------------------------------
 def _coerce_int(val: Any) -> Optional[int]:
     """Best-effort conversion to int; return None if not possible."""
@@ -1146,7 +1065,7 @@ def _add_months(d: datetime.date, months: int) -> datetime.date:
     return datetime.date(year, month, day)
 
 
-def _compute_date_bounds_with_window() -> tuple[Optional[str], Optional[str], bool]:
+def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bool]:
     """
     Compute (date_before_cfg, date_after_cfg, window_finished) to be passed
     into ASMRFetcher as (published_before, published_after).
@@ -1158,15 +1077,16 @@ def _compute_date_bounds_with_window() -> tuple[Optional[str], Optional[str], bo
 
         * If 'date_window_months' > 0 and both 'date_before' and 'date_after'
           are configured:
-            - Treat 'date_before'              as global START of the range.
-            - Treat 'date_after'              as global END of the range.
+            - Interpret the two dates purely as bounds:
+                earlier one  -> global_start
+                later   one  -> global_end
             - Persist a progress file
               '<data_folder>/date_window_state.json' with:
                   {"next_start": "YYYY-MM-DD"}
             - For each run:
                 current_start = max(global_start, next_start or global_start)
                 if current_start >= global_end:
-                    -> return (None, None, True)  # finished, do not pass this date
+                    -> return (None, None, True)
                 current_end   = min(current_start + window_months, global_end)
                 save next_start = current_end
 
@@ -1175,36 +1095,37 @@ def _compute_date_bounds_with_window() -> tuple[Optional[str], Optional[str], bo
                 date_after_cfg  = current_start (published_after)
 
         * Once current_start reaches or passes global_end, the function
-          returns (None, None, True). The main block will then **not**
-          call fetch_asmr_videos() at all, so no date is passed to the
-          YouTube API after the configured end (honouring "Do not pass this date").
+          returns (None, None, True). The main block will then skip
+          calling fetch_asmr_videos() (so we don't pass dates again).
     """
-    raw_before = common.get_configs("date_before")
+    raw_before = common.get_configs("date_before") or common.get_configs("date")
     raw_after = common.get_configs("date_after")
     raw_window = common.get_configs("date_window_months")
 
     window_months = _coerce_int(raw_window) or 0
 
-    # No windowing requested: keep original behaviour.
     if window_months <= 0:
         return raw_before, raw_after, False
 
-    # Need both bounds to build a window; otherwise fall back.
     if not raw_before or not raw_after:
         return raw_before, raw_after, False
 
-    global_start = _parse_date_only(raw_before)
-    global_end = _parse_date_only(raw_after)
+    d_before = _parse_date_only(raw_before)
+    d_after = _parse_date_only(raw_after)
 
-    # If parsing fails or range is invalid, keep original behaviour.
-    if not global_start or not global_end or global_start >= global_end:
+    if not d_before or not d_after:
         return raw_before, raw_after, False
+
+    global_start = min(d_before, d_after)
+    global_end = max(d_before, d_after)
+
+    if global_start == global_end:
+        return None, None, True
 
     data_folder = common.get_configs("data") or "."
     os.makedirs(data_folder, exist_ok=True)
     state_path = os.path.join(data_folder, "date_window_state.json")
 
-    # Load state from previous runs (if any).
     next_start_date: Optional[datetime.date] = None
     if os.path.exists(state_path):
         try:
@@ -1217,74 +1138,96 @@ def _compute_date_bounds_with_window() -> tuple[Optional[str], Optional[str], bo
         except Exception:
             next_start_date = None
 
-    # Decide where this run should start.
-    if next_start_date is None or next_start_date <= global_start:
+    if next_start_date is None or next_start_date < global_start:
         current_start = global_start
     else:
         current_start = next_start_date
 
-    # If we've already reached or passed the global_end, we're done.
     if current_start >= global_end:
-        # Signal: no more windows; do not pass any date filter.
         return None, None, True
 
-    # Compute end of the current window.
     candidate_end = _add_months(current_start, window_months)
     if candidate_end > global_end:
         current_end = global_end
     else:
         current_end = candidate_end
 
-    # Persist state for the next run: next window starts at this window's end.
     try:
         with open(state_path, "w", encoding="utf-8") as f:
             json.dump({"next_start": current_end.isoformat()}, f, indent=2)
     except Exception:
-        # State persistence failure shouldn't break the current run.
         pass
 
-    # Map to ASMRFetcher arguments:
-    #   date_before_cfg -> published_before (upper bound)
-    #   date_after_cfg  -> published_after  (lower bound)
     date_before_cfg = current_end.isoformat()
     date_after_cfg = current_start.isoformat()
 
     return date_before_cfg, date_after_cfg, False
 
 
+def _load_api_keys_from_secrets() -> List[str]:
+    """
+    Load one or more API keys from secrets.
+
+    Supports:
+        - google-api-keys: list or comma/semicolon separated string
+        - google-api-key: single key (fallback)
+    """
+    raw = common.get_secrets("google-api-keys") or common.get_secrets("google-api-key")
+    keys: List[str] = []
+
+    if not raw:
+        return keys
+
+    if isinstance(raw, str):
+        parts = re.split(r"[;,]", raw)
+        keys = [p.strip() for p in parts if p.strip()]
+    elif isinstance(raw, (list, tuple, set)):
+        for item in raw:
+            s = str(item).strip()
+            if s:
+                keys.append(s)
+    else:
+        s = str(raw).strip()
+        if s:
+            keys.append(s)
+
+    return keys
+
+
 # -------------------------------------------------------------------------
-# Standalone execution entry point
+# Standalone execution entry point (cron-friendly, multi-key)
 # -------------------------------------------------------------------------
+api_keys = _load_api_keys_from_secrets()
+
 secret = SimpleNamespace(
-    API=common.get_secrets("google-api-key"),
+    API_KEYS=api_keys,
 )
 
-# Determine date bounds, possibly using windowing.
-date_before_cfg, date_after_cfg, _window_finished = _compute_date_bounds_with_window()
+date_before_cfg, date_after_cfg, window_finished = _compute_date_bounds_with_window()
 
 fetcher = ASMRFetcher(
-    api_key=secret.API,  # If this is None/empty → only pytubefix Search is used.
+    api_keys=secret.API_KEYS,
     query=common.get_configs("query"),
     max_pages=100,
     results_per_page=50,
     seen_file="seen_video_ids.txt",
     json_output="asmr_results.json",
-    # If both are None/empty and windowing is disabled, no date filter is applied.
-    # If windowing is enabled and _window_finished is True, we won't call fetch().
     published_before=date_before_cfg,
     published_after=date_after_cfg,
 )
 
 if __name__ == "__main__":
-    # If windowing is enabled and we've exhausted the configured range,
-    # do NOT call fetch_asmr_videos at all (do not pass date_after again).
     raw_window = common.get_configs("date_window_months")
     window_months = _coerce_int(raw_window) or 0
 
-    if window_months > 0 and _window_finished:
+    if window_months > 0 and window_finished:
         fetcher.logger.info(
-            "Date windowing: configured [date_before, date_after] range has "
-            "already been fully processed. Skipping fetch_asmr_videos() for this run."
+            "Date windowing: configured range has already been fully processed. "
+            "Skipping fetch_asmr_videos() for this run."
         )
     else:
+        fetcher.logger.info(
+            f"Running with published_after={date_after_cfg}, "
+            f"published_before={date_before_cfg}"
+        )
         fetcher.fetch_asmr_videos()
