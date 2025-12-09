@@ -1,7 +1,6 @@
 import json
 import logging
 import os
-import re
 import shutil
 import warnings
 from collections import Counter
@@ -12,7 +11,9 @@ import numpy as np
 import pandas as pd
 import plotly as py
 import plotly.express as px
-from wordcloud import WordCloud, STOPWORDS
+import matplotlib.pyplot as plt
+import webbrowser
+
 import common
 from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
@@ -25,6 +26,9 @@ from sklearn.manifold import TSNE
 
 import spacy
 from scipy import stats
+
+from utils.tool import Tools
+from utils.plots import Plots
 
 
 # ---------------------------------------------------------------------------
@@ -47,11 +51,10 @@ logger = logging.getLogger(__name__)
 
 _NLP_CACHE: Optional["spacy.language.Language"] = None  # type: ignore[valid-type]
 
-warnings.filterwarnings(
-    "ignore",
-    category=DeprecationWarning,
-    module=r"plotly\.io\._kaleido",
-)
+warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"plotly\.io\._kaleido")
+
+tool_class = Tools()
+plot_class = Plots()
 
 
 # ============================================================================
@@ -116,7 +119,7 @@ _LANGUAGE_MAP: Dict[str, str] = {
     "bg": "Bulgarian",
 
     # Tagalog / Filipino
-    "tl": "Tagalog / Filipino",
+    "tl": "Filipino",
 
     # Fallback
     "unknown": "Unknown",
@@ -180,89 +183,6 @@ def build_corpus(data: Dict[str, Any], source: str) -> str:
         f"total characters={len(raw_text)}"
     )
     return raw_text
-
-
-def clean_text(text: str) -> str:
-    """Simple cleaning for wordcloud / spaCy text."""
-    text = re.sub(r"http\S+", " ", text)
-    text = re.sub(r"[\r\n]+", " ", text)
-    return text
-
-
-def get_custom_stopwords() -> Set[str]:
-    """Create a combined stopword set for word cloud and spaCy lemma filtering."""
-    stopwords = set(STOPWORDS)
-
-    custom_stopwords = {
-        # Domain-specific.
-        "asmr", "ASMR", "gmail", "comment", "twitter", "facebook", "patreon", "help",
-        "new", "youtube", "enjoy", "let", "spotify", "email",
-
-        # Basic English stopwords.
-        "a", "about", "above", "after", "again", "against", "all", "am", "an", "and",
-        "any", "are", "aren't", "as", "at", "be", "because", "been", "before",
-        "being", "below", "between", "both", "but", "by", "can", "could", "couldn't",
-        "did", "didn't", "do", "does", "doesn't", "doing", "don't", "down", "during",
-        "each", "few", "for", "from", "further", "had", "hadn't", "has", "hasn't",
-        "have", "haven't", "having", "he", "he'd", "he'll", "he's", "her", "here",
-        "here's", "hers", "herself", "him", "himself", "his", "how", "how's", "i",
-        "i'd", "i'll", "i'm", "i've", "if", "in", "into", "is", "isn't", "it",
-        "it's", "its", "itself", "let's", "me", "more", "most", "mustn't", "my",
-        "myself", "no", "nor", "not", "of", "off", "on", "once", "only", "or", "other",
-        "ought", "our", "ours", "ourselves", "out", "over", "own", "same", "shan't",
-        "she", "she'd", "she'll", "she's", "should", "shouldn't", "so", "some", "such",
-        "than", "that", "that's", "the", "their", "theirs", "them", "themselves",
-        "then", "there", "there's", "these", "they", "they'd", "they'll", "they're",
-        "they've", "this", "those", "through", "to", "too", "under", "until", "up",
-        "very", "was", "wasn't", "we", "we'd", "we'll", "we're", "we've", "were",
-        "weren't", "what", "what's", "when", "when's", "where", "where's", "which",
-        "while", "who", "who's", "whom", "why", "why's", "with", "won't", "would",
-        "wouldn't", "you", "you'd", "you'll", "you're", "you've", "your", "yours",
-        "yourself", "yourselves",
-
-        # Social media fillers.
-        "thanks", "thank", "thankyou", "thanksgiving", "subscribe", "sub", "follow",
-        "like", "likes", "watch", "watching", "video", "videos", "link", "please",
-        "dm", "instagram", "tiktok", "channel",
-
-        # French fillers.
-        "le", "la", "les", "de", "du", "des", "un", "une", "et", "en", "dans",
-        "ce", "ces", "je", "tu", "que", "qui", "au", "aux", "pour", "mais",
-    }
-    stopwords.update(custom_stopwords)
-
-    single_letters = {chr(i) for i in range(ord("a"), ord("z") + 1)}
-    single_letters |= {chr(i) for i in range(ord("A"), ord("Z") + 1)}
-    stopwords.update(single_letters)
-
-    punctuation_tokens = {
-        ".", ",", "!", "?", ":", ";", "-", "_", "(", ")", "[", "]", "{", "}", "'",
-        '"', "/", "\\", "|", "&", "*", "#", "@", "...", "..",
-    }
-    stopwords.update(punctuation_tokens)
-
-    digits = {str(i) for i in range(10)}
-    stopwords.update(digits)
-
-    logger.info(f"Custom stopword set size: {len(stopwords)} tokens")
-    return stopwords
-
-
-def generate_wordcloud_image(text: str, stopwords: Set[str]):
-    """Generate a word cloud image array from text."""
-    wordcloud = WordCloud(
-        width=1000,
-        height=600,
-        background_color="white",
-        stopwords=stopwords,
-        collocations=False,
-    ).generate(text)
-    img = wordcloud.to_array()
-    logger.info(
-        f"Generated word cloud with {len(wordcloud.words_)} unique words "
-        f"(highest weight word='{next(iter(wordcloud.words_))}' if any)."
-    )
-    return img
 
 
 def create_plotly_figure(img, title: str = "") -> Any:
@@ -369,13 +289,13 @@ def save_plotly_figure(fig: Any, filename: str, width: int = 1600, height: int =
 
 def run_wordcloud_pipeline(data: Dict[str, Any], text_source: str = "both") -> None:
     """Run a word cloud for the chosen text source (title / description / both)."""
-    stopwords = get_custom_stopwords()
+    stopwords = tool_class.get_custom_stopwords()
 
     logger.info(f"Generating word cloud for text_source='{text_source}'")
     raw_text = build_corpus(data, source=text_source)
-    cleaned_text = clean_text(raw_text)
+    cleaned_text = tool_class.clean_text(raw_text)
 
-    img = generate_wordcloud_image(cleaned_text, stopwords)
+    img = plot_class.generate_wordcloud_image(cleaned_text, stopwords)
     fig = create_plotly_figure(img, title="")
 
     filename = f"wordcloud_{text_source}"
@@ -439,7 +359,7 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
         else:
             raise ValueError(f"Unsupported text_source: {text_source!r}")
 
-        texts.append(clean_text(txt))
+        texts.append(tool_class.clean_text(txt))
 
     mode = "explicit" if target_lemmas else "auto-topk"
     logger.info(
@@ -466,7 +386,10 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
             if token.is_stop:
                 continue
 
-            lemma = token.lemma_.lower()
+            # NEW: get raw lemma from spaCy, then normalize it
+            raw_lemma = token.lemma_.lower()
+            lemma = tool_class.normalize_lemma_form(raw_lemma)
+
             if lemma in extra_stopwords_lc:
                 continue
 
@@ -526,6 +449,12 @@ def plot_spacy_keyword_bar(keyword_df: pd.DataFrame, filename: str = "spacy_keyw
         x="lemma",
         y="count",
         labels={"lemma": "Lemma", "count": "Number of videos containing lemma"},
+        text="count"
+    )
+    # Put the text on top of each bar
+    fig.update_traces(
+        texttemplate="%{text}",
+        textposition="outside",
     )
 
     fig.update_xaxes(tickangle=45)
@@ -554,48 +483,6 @@ def _parse_upload_datetime(upload_date_str: Optional[str]) -> Optional[datetime]
         return None
 
 
-def _month_to_season(month: Optional[int]) -> str:
-    """Map month to a simple meteorological season."""
-    if month is None or pd.isna(month):
-        return "unknown"
-    m = int(month)
-    if m in (12, 1, 2):
-        return "Winter"
-    if m in (3, 4, 5):
-        return "Spring"
-    if m in (6, 7, 8):
-        return "Summer"
-    if m in (9, 10, 11):
-        return "Autumn"
-    return "unknown"
-
-
-def _duration_bucket(minutes: float) -> str:
-    """
-    Bucket video duration into fixed ranges (in minutes):
-
-    - under_10min  : < 10
-    - 10_to_30min  : 10–30
-    - 30_to_60min  : 30–60
-    - 60_to_180min : 60–180
-    - over_180min  : > 180
-    - unknown      : missing / non-positive
-    """
-    if pd.isna(minutes) or minutes <= 0:
-        return "unknown"
-
-    m = float(minutes)
-    if m < 10:
-        return "under_10min"
-    if m < 30:
-        return "10_to_30min"
-    if m < 60:
-        return "30_to_60min"
-    if m < 180:
-        return "60_to_180min"
-    return "over_180min"
-
-
 def get_text_series(df: pd.DataFrame, text_source: str = "both") -> pd.Series:
     """Return text Series according to requested source."""
     text_source = text_source.lower()
@@ -607,7 +494,7 @@ def get_text_series(df: pd.DataFrame, text_source: str = "both") -> pd.Series:
     if text_source == "description":
         return descriptions
     if text_source == "both":
-        return titles + " " + descriptions
+        return titles + " " + descriptions  # type: ignore
     raise ValueError(f"Unsupported text_source: {text_source!r}")
 
 
@@ -886,7 +773,7 @@ def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] =
     )
 
     df["duration_minutes"] = df["duration_seconds"] / 60.0
-    df["duration_bucket"] = df["duration_minutes"].apply(_duration_bucket)
+    df["duration_bucket"] = df["duration_minutes"].apply(tool_class._duration_bucket)
 
     df["engagement_rate"] = np.where(
         df["views"] > 0,
@@ -909,7 +796,7 @@ def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] =
     df["upload_month"] = df["upload_datetime"].dt.month  # type: ignore
     df["upload_day"] = df["upload_datetime"].dt.day  # type: ignore
     df["upload_date"] = df["upload_datetime"].dt.date  # type: ignore
-    df["upload_season"] = df["upload_month"].apply(_month_to_season)
+    df["upload_season"] = df["upload_month"].apply(tool_class._month_to_season)
 
     df = add_title_style_features(df)
     df = add_theme_flags(df, text_source=text_source)
@@ -920,6 +807,171 @@ def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] =
         f"final shape is {df.shape}"
     )
     return df
+
+
+def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", label_clusters: bool = True,
+                       ellipse_scale: float = 1.2):
+    """
+    Produce a research-style t-SNE plot with:
+    - stable color map
+    - ellipse-like outlines around clusters (via Plotly path shapes)
+    - labeled cluster centroids
+    - extensive logger output to interpret clusters
+    """
+
+    import plotly.graph_objects as go
+
+    # Require necessary columns
+    if {"cluster", "embedding_x", "embedding_y"} - set(df.columns):
+        logger.warning("t-SNE research plot: missing embedding_x/y or cluster.")
+        return
+
+    df = df.dropna(subset=["embedding_x", "embedding_y"]).copy()
+    if df.empty:
+        logger.warning("t-SNE research plot: no non-null embeddings.")
+        return
+
+    df["cluster"] = df["cluster"].astype(int)
+    df["cluster_str"] = df["cluster"].astype(str)
+
+    # ------------------------------------------------------------------
+    # LOGGING
+    # ------------------------------------------------------------------
+    logger.info("===== t-SNE RESEARCH PLOT SUMMARY =====")
+    logger.info(f"Total points in t-SNE: {len(df)}")
+
+    logger.info(
+        "Cluster sizes:\n"
+        + df["cluster"].value_counts().sort_index().to_string()
+    )
+
+    if "language" in df.columns:
+        logger.info("Top languages per cluster:")
+        for cid, grp in df.groupby("cluster"):
+            lang = grp["language"].value_counts().head(5)
+            logger.info(f"  cluster {cid}:\n{lang.to_string()}")
+
+    theme_cols = [c for c in df.columns if c.startswith("has_")]
+    for theme_col in theme_cols:
+        mean_vals = df.groupby("cluster")[theme_col].mean().round(3)
+        logger.info(f"{theme_col} prevalence per cluster:\n{mean_vals.to_string()}")
+
+    logger.info("================================================")
+
+    # ------------------------------------------------------------------
+    # COLOR MAP (stable by cluster id)
+    # ------------------------------------------------------------------
+    palette = px.colors.qualitative.Plotly
+    unique_clusters = sorted(df["cluster"].unique())
+    color_map = {
+        str(c): palette[i % len(palette)]
+        for i, c in enumerate(unique_clusters)
+    }
+
+    # ------------------------------------------------------------------
+    # SCATTER LAYER
+    # ------------------------------------------------------------------
+    fig = go.Figure()
+
+    for cid, grp in df.groupby("cluster"):
+        fig.add_trace(
+            go.Scatter(
+                x=grp["embedding_x"],
+                y=grp["embedding_y"],
+                mode="markers",
+                marker=dict(size=5, color=color_map[str(cid)], opacity=0.55),
+                name=f"Cluster {cid}",
+                text=grp.get("title", "").fillna(""),  # type: ignore
+                hovertemplate="<b>%{text}</b><br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>",
+            )
+        )
+
+    # ------------------------------------------------------------------
+    # CLUSTER OUTLINES (ellipse-like using Plotly path shapes)
+    # ------------------------------------------------------------------
+    shapes = []
+    for cid, grp in df.groupby("cluster"):
+        if len(grp) < 3:
+            continue
+
+        x = grp["embedding_x"].values
+        y = grp["embedding_y"].values
+
+        cx, cy = x.mean(), y.mean()  # type: ignore
+        cov = np.cov(x, y)  # type: ignore
+
+        # Eigendecomposition for principal axes
+        eigvals, eigvecs = np.linalg.eigh(cov)
+        order = eigvals.argsort()[::-1]
+        eigvals = eigvals[order]
+        eigvecs = eigvecs[:, order]
+
+        # 1-sigma ellipse radii
+        width, height = 2 * ellipse_scale * np.sqrt(eigvals)
+        angle = np.arctan2(eigvecs[1, 0], eigvecs[0, 0])
+
+        # Parameterize ellipse and build path string
+        theta = np.linspace(0, 2 * np.pi, 200)
+        ex = (width / 2.0) * np.cos(theta)
+        ey = (height / 2.0) * np.sin(theta)
+
+        # Rotate and translate
+        xr = cx + ex * np.cos(angle) - ey * np.sin(angle)
+        yr = cy + ex * np.sin(angle) + ey * np.cos(angle)
+
+        # Build SVG-like path for Plotly
+        path_cmds = [f"M {xr[0]},{yr[0]}"] + [
+            f"L {xr[i]},{yr[i]}" for i in range(1, len(xr))
+        ]
+        path_cmds.append("Z")
+        path = " ".join(path_cmds)
+
+        shapes.append(
+            dict(
+                type="path",
+                path=path,
+                line=dict(color=color_map[str(cid)], width=2, dash="dot"),
+                fillcolor="rgba(0,0,0,0)",
+                opacity=0.4,
+            )
+        )
+
+        # Optional centroid label (A, B, C...; fall back to cluster id if > 26)
+        if label_clusters:
+            if 0 <= cid < 26:  # type: ignore
+                label = chr(65 + cid)  # type: ignore
+            else:
+                label = f"C{cid}"
+            fig.add_trace(
+                go.Scatter(
+                    x=[cx],
+                    y=[cy],
+                    mode="text",
+                    text=[label],
+                    textfont=dict(size=24, color="black"),
+                    showlegend=False,
+                )
+            )
+
+    fig.update_layout(shapes=shapes)
+
+    fig.update_layout(
+        width=1200,
+        height=900,
+        title="t-SNE Cluster Map",
+        plot_bgcolor="white",
+        paper_bgcolor="white",
+        xaxis_title="",
+        yaxis_title="",
+    )
+
+    save_plotly_figure(
+        fig,
+        f"cluster_tsne_research_{name_suffix}",
+        width=1600,
+        height=900,
+        scale=3,
+    )
 
 
 def summarize_by_duration_bucket(df: pd.DataFrame) -> pd.DataFrame:
@@ -1014,9 +1066,7 @@ def summarize_title_styles(df: pd.DataFrame) -> pd.DataFrame:
 
 
 def summarize_theme_vs_growth(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
-    """Compare views_per_day 
-::contentReference[oaicite:0]{index=0}
-for videos with vs without a given theme flag."""
+    """Compare views_per_day for videos with vs without a given theme flag."""
     if theme_col not in df.columns:
         raise ValueError(f"Unknown theme column: {theme_col}")
 
@@ -1311,8 +1361,13 @@ def cluster_videos(df: pd.DataFrame, n_clusters: int = 10, random_state: int = 4
 # ---------------------------------------------------------------------------
 
 def plot_duration_vs_views(df: pd.DataFrame) -> None:
-    """Single plot: log-log duration (seconds) vs views for all videos."""
-    df_plot = df[["duration_seconds", "views"]].dropna()
+    """
+    Hexbin plot: log–log duration (seconds) vs views for all videos.
+    Uses Matplotlib and saves HTML, PNG, and EPS. The HTML is opened
+    in the default browser.
+    """
+    df_plot = df[["duration_seconds", "views"]].copy()
+    df_plot = df_plot.replace([np.inf, -np.inf], np.nan).dropna()
     df_plot = df_plot[
         (df_plot["duration_seconds"] > 0) &
         (df_plot["views"] > 0)
@@ -1323,7 +1378,7 @@ def plot_duration_vs_views(df: pd.DataFrame) -> None:
         return
 
     logger.info(
-        f"Duration vs views plot uses {len(df_plot)} videos with positive "
+        f"Duration vs views hexbin plot uses {len(df_plot)} videos with positive "
         "duration and views."
     )
     logger.info(
@@ -1335,38 +1390,77 @@ def plot_duration_vs_views(df: pd.DataFrame) -> None:
         f"{df_plot['views'].describe().to_string()}"
     )
 
-    fig = px.scatter(
-        df_plot,
-        x="duration_seconds",
-        y="views",
-        title="",
-        labels={
-            "duration_seconds": "Duration (seconds)",
-            "views": "Views",
-        },
-        opacity=0.6,
-    )
+    # Matplotlib hexbin on log–log axes
+    fig, ax = plt.subplots(figsize=(12, 8))
 
-    fig.update_traces(marker=dict(color="red"))
+    hb = ax.hexbin(
+        df_plot["duration_seconds"].to_numpy(),
+        df_plot["views"].to_numpy(),
+        gridsize=60,
+        xscale="log",
+        yscale="log",
+        bins="log",
+        mincnt=1,
+    )
+    cb = fig.colorbar(hb, ax=ax)
+    cb.set_label("")
 
-    fig.update_xaxes(
-        type="log",
-        tick0=0,
-        dtick=1,
-    )
-    fig.update_yaxes(
-        type="log",
-        tick0=0,
-        dtick=1,
-    )
+    ax.set_xscale("log")
+    ax.set_yscale("log")
+    ax.set_xlabel("Duration (seconds)")
+    ax.set_ylabel("Views")
+    ax.set_title("")
 
-    save_plotly_figure(
-        fig,
-        "duration_vs_views",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
+    fig.tight_layout()
+
+    # Save files
+    filename = "duration_vs_views"
+    os.makedirs(common.output_dir, exist_ok=True)
+    output_final = os.path.join(common.root_dir, "figures")
+    os.makedirs(output_final, exist_ok=True)
+
+    png_path = os.path.join(common.output_dir, f"{filename}.png")
+    eps_path = os.path.join(common.output_dir, f"{filename}.eps")
+    html_path = os.path.join(common.output_dir, f"{filename}.html")
+
+    fig.savefig(png_path, format="png", dpi=300, bbox_inches="tight")
+    fig.savefig(eps_path, format="eps", dpi=300, bbox_inches="tight")
+
+    final_png_path = os.path.join(output_final, f"{filename}.png")
+    final_eps_path = os.path.join(output_final, f"{filename}.eps")
+    shutil.copy(png_path, final_png_path)
+    shutil.copy(eps_path, final_eps_path)
+
+    # Simple HTML referencing the PNG (works from both output/ and figures/)
+    rel_png_name = f"{filename}.png"
+    html_content = f"""<!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset='utf-8'>
+        <title>{filename}</title>
+    </head>
+    <body>
+        <img src='{rel_png_name}' alt='{filename}' />
+    </body>
+    </html>
+    """
+
+    with open(html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    final_html_path = os.path.join(output_final, f"{filename}.html")
+    with open(final_html_path, "w", encoding="utf-8") as f:
+        f.write(html_content)
+
+    plt.close(fig)
+
+    # Try to auto-open the HTML file in the default browser
+    try:
+        abs_html = os.path.abspath(html_path)
+        webbrowser.open(f"file://{abs_html}", new=2)
+        logger.info(f"Opened HTML for {filename} at {abs_html}")
+    except Exception as exc:
+        logger.warning(f"Could not auto-open HTML for {filename}: {exc}")
 
 
 def analyze_log_views_normality(df: pd.DataFrame) -> None:
@@ -1797,7 +1891,28 @@ def plot_monthly_counts(monthly_counts: pd.DataFrame) -> None:
     )
 
 
-def plot_cluster_distribution(clustered_df: pd.DataFrame, name_suffix: str = "") -> None:
+def _get_cluster_color_map(clusters: np.ndarray) -> Dict[str, str]:
+    """
+    Return a stable mapping from cluster id (as string) to a fixed color.
+    This ensures that cluster '0' is always the same color, '1' is another, etc.
+    """
+    unique_clusters = sorted(int(c) for c in np.unique(clusters))
+    cluster_labels = [str(c) for c in unique_clusters]
+
+    palette = px.colors.qualitative.Plotly
+
+    color_map: Dict[str, str] = {}
+    for i, label in enumerate(cluster_labels):
+        color_map[label] = palette[i % len(palette)]
+
+    return color_map
+
+
+def plot_cluster_distribution(
+    clustered_df: pd.DataFrame,
+    name_suffix: str = "",
+    highlight_cluster: Optional[int] = None,
+) -> None:
     """Visualize clusters: bar charts + 2D scatter with circles around clusters."""
     if "cluster" not in clustered_df.columns:
         logger.warning("No 'cluster' column in clustered_df; skipping cluster plots.")
@@ -1867,19 +1982,46 @@ def plot_cluster_distribution(clustered_df: pd.DataFrame, name_suffix: str = "")
         )
         return
 
+    df_emb["cluster"] = df_emb["cluster"].astype(int)
+    df_emb["cluster_str"] = df_emb["cluster"].astype(str)
+    cluster_order = sorted(df_emb["cluster_str"].unique())
+    color_discrete_map = _get_cluster_color_map(df_emb["cluster"].values)  # type: ignore
+
     fig = px.scatter(
         df_emb,
         x="embedding_x",
         y="embedding_y",
-        color="cluster",
+        color="cluster_str",
         hover_data=["video_id", "title", "language", "views", "duration_minutes"],
         title="",
         labels={
             "embedding_x": "",
             "embedding_y": "",
-            "cluster": "",
+            "cluster_str": "",
         },
+        category_orders={"cluster_str": cluster_order},
+        color_discrete_map=color_discrete_map,
     )
+
+    # Optionally highlight a single cluster (larger markers + black outline)
+    if highlight_cluster is not None:
+        highlight_label = str(highlight_cluster)
+
+        fig.for_each_trace(
+            lambda trace: trace.update(
+                marker=dict(
+                    size=10,
+                    line=dict(width=2, color="black"),
+                )
+            )
+            if trace.name == highlight_label
+            else trace.update(
+                marker=dict(
+                    size=5,
+                    opacity=0.3,
+                )
+            )
+        )
 
     shapes = []
     for cluster_id, group in df_emb.groupby("cluster"):
@@ -2048,6 +2190,48 @@ def cluster_videos_tsne(df: pd.DataFrame, n_clusters: int = 10, random_state: in
         df_copy["embedding_y"] = np.nan
 
     return df_copy, pipeline
+
+
+def describe_clusters(clustered_df: pd.DataFrame, top_n_languages: int = 3) -> pd.DataFrame:
+    """
+    Produce a summary description per cluster to help interpret what it 'is'.
+    """
+    df = clustered_df.copy()
+
+    theme_cols = [
+        c for c in df.columns
+        if c.startswith("has_") and df[c].dtype == bool
+    ]
+
+    summaries = []
+    for cluster_id, group in df.groupby("cluster"):
+        row: Dict[str, Any] = {
+            "cluster": int(cluster_id),  # type: ignore
+            "n_videos": len(group),
+        }
+
+        for col in ["views", "views_per_day", "duration_minutes", "engagement_rate"]:
+            if col in group.columns:
+                row[f"mean_{col}"] = float(group[col].mean(skipna=True))
+
+        if "language" in group.columns:
+            lang_counts = group["language"].value_counts()
+            top_langs = lang_counts.head(top_n_languages)
+            row["top_languages"] = "; ".join(
+                f"{lang} ({cnt})" for lang, cnt in top_langs.items()
+            )
+
+        for tcol in theme_cols:
+            row[f"share_{tcol}"] = float(group[tcol].mean())
+
+        summaries.append(row)
+
+    cluster_desc = pd.DataFrame(summaries).sort_values("cluster").reset_index(drop=True)
+    logger.info(
+        "Cluster interpretation summary:\n"
+        f"{cluster_desc.to_string(index=False)}"
+    )
+    return cluster_desc
 
 
 # ---------------------------------------------------------------------------
@@ -2271,6 +2455,11 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         )
         logger.info(f"Cluster summary saved to {cluster_summary_csv}")
 
+        cluster_desc = describe_clusters(clustered_df)
+        cluster_desc_csv = os.path.join(analysis_dir, "cluster_descriptions.csv")
+        cluster_desc.to_csv(cluster_desc_csv, index=False)
+        logger.info(f"Cluster descriptions saved to {cluster_desc_csv}")
+
     if pca_info is not None and not pca_info.empty:
         pca_csv = os.path.join(analysis_dir, "cluster_pca_variance.csv")
         pca_info.to_csv(pca_csv, index=False)
@@ -2294,11 +2483,13 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         clustered_df[emb_cols].to_csv(embedding_csv, index=False)
         logger.info(f"2D PCA embedding for clusters saved to {embedding_csv}")
 
+        # Stable colors; highlight_cluster can be set here if desired
         plot_cluster_distribution(clustered_df, name_suffix="pca")
 
         clustered_tsne_df, tsne_pipeline = cluster_videos_tsne(
             df, n_clusters=12, text_source=TEXT_SOURCE
         )
+        plot_tsne_research(clustered_tsne_df)
 
         tsne_embedding_csv = os.path.join(analysis_dir, "cluster_embedding_2d_tsne.csv")
         if {"embedding_x", "embedding_y"}.issubset(clustered_tsne_df.columns):
@@ -2342,7 +2533,7 @@ def main() -> None:
             text_source=TEXT_SOURCE,
             model_name="en_core_web_sm",
             top_k=30,
-            extra_stopwords=get_custom_stopwords(),
+            extra_stopwords=tool_class.get_custom_stopwords(),
         )
         logger.info(f"Saving spaCy keyword counts to pickle {keyword_pickle}")
         keyword_df.to_pickle(keyword_pickle)
