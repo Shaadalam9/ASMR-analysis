@@ -114,6 +114,8 @@ from custom_logger import CustomLogger
 # Make langdetect deterministic (otherwise results can vary run-to-run).
 DetectorFactory.seed = 0
 
+data_folder = common.get_configs("data")
+
 
 class ASMRFetcher:
     """Fetch, enrich, and persist query-related videos from YouTube."""
@@ -1122,7 +1124,6 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
     if global_start == global_end:
         return None, None, True
 
-    data_folder = common.get_configs("data") or "."
     os.makedirs(data_folder, exist_ok=True)
     state_path = os.path.join(data_folder, "date_window_state.json")
 
@@ -1205,6 +1206,9 @@ def _load_api_keys_from_secrets() -> List[str]:
 if __name__ == "__main__":
     api_keys = _load_api_keys_from_secrets()
     secret = SimpleNamespace(API_KEYS=api_keys)
+
+    if os.path.isfile(os.path.join(data_folder, "date_window_state.json")):
+        os.remove(os.path.join(data_folder, "date_window_state.json"))
 
     raw_window = common.get_configs("date_window_months")
     window_months = _coerce_int(raw_window) or 0

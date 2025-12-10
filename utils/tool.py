@@ -1,6 +1,6 @@
 import pandas as pd
 from wordcloud import STOPWORDS
-from typing import Optional, Set
+from typing import Optional, Set, Dict
 import logging
 import re
 
@@ -140,3 +140,89 @@ class Tools():
         if m < 180:
             return "60_to_180min"
         return "over_180min"
+
+    def get_language_name(self, code: str) -> str:
+        """
+        Return the human-readable language name for a given language code.
+
+        Normalizes the input by:
+        - Stripping leading/trailing whitespace
+        - Lowercasing
+        - Replacing underscores with hyphens
+
+        Falls back to "Unknown" if the code is not in the map.
+        """
+
+        language_map: Dict[str, str] = {
+            # English variants
+            "en": "English",
+            "eng": "English",
+            "en-us": "English",
+            "en-gb": "English",
+
+            # Japanese
+            "jp": "Japanese",
+            "ja": "Japanese",
+
+            # Spanish
+            "es": "Spanish",
+            "es-es": "Spanish",
+            "es-mx": "Spanish (Mexico)",
+
+            # Major European languages
+            "fr": "French",
+            "de": "German",
+            "it": "Italian",
+            "pt": "Portuguese",
+            "pt-br": "Portuguese (Brazil)",
+            "pt-pt": "Portuguese (Portugal)",
+            "ca": "Catalan",
+            "et": "Estonian",
+
+            # Asian languages
+            "ru": "Russian",
+            "ko": "Korean",
+            "kr": "Korean",
+            "zh": "Chinese",
+            "zh-cn": "Chinese (Simplified)",
+            "zh-tw": "Chinese (Traditional)",
+
+            # Northern European
+            "nl": "Dutch",
+            "sv": "Swedish",
+            "no": "Norwegian",
+            "da": "Danish",
+            "fi": "Finnish",
+
+            # Other common
+            "pl": "Polish",
+            "tr": "Turkish",
+            "ar": "Arabic",
+            "hi": "Hindi",
+            "id": "Indonesian",
+            "th": "Thai",
+            "vi": "Vietnamese",
+
+            # Central / Eastern / misc.
+            "cs": "Czech",
+            "el": "Greek",
+            "ro": "Romanian",
+            "hu": "Hungarian",
+            "he": "Hebrew",
+            "uk": "Ukrainian",
+            "bg": "Bulgarian",
+            "af": "Afrikaans",
+            "sw": "Swahili",
+
+            # Tagalog / Filipino
+            "tl": "Filipino",
+
+            # Fallback
+            "unknown": "Unknown",
+        }
+
+        if not code:
+            return language_map["unknown"]
+
+        normalized = code.strip().lower().replace("_", "-")
+        return language_map.get(normalized, language_map["unknown"])

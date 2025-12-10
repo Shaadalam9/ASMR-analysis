@@ -12,6 +12,7 @@ import pandas as pd
 import plotly as py
 import plotly.express as px
 import matplotlib.pyplot as plt
+import plotly.graph_objects as go
 import webbrowser
 
 import common
@@ -61,71 +62,6 @@ plot_class = Plots()
 # Language normalization
 # ============================================================================
 
-_LANGUAGE_MAP: Dict[str, str] = {
-    # English variants
-    "en": "English",
-    "eng": "English",
-    "en-us": "English",
-    "en-gb": "English",
-
-    # Japanese
-    "jp": "Japanese",
-    "ja": "Japanese",
-
-    # Spanish
-    "es": "Spanish",
-    "es-es": "Spanish",
-    "es-mx": "Spanish (Mexico)",
-
-    # Major European languages
-    "fr": "French",
-    "de": "German",
-    "it": "Italian",
-    "pt": "Portuguese",
-    "pt-br": "Portuguese (Brazil)",
-    "pt-pt": "Portuguese (Portugal)",
-
-    # Asian languages
-    "ru": "Russian",
-    "ko": "Korean",
-    "kr": "Korean",
-    "zh": "Chinese",
-    "zh-cn": "Chinese (Simplified)",
-    "zh-tw": "Chinese (Traditional)",
-
-    # Northern European
-    "nl": "Dutch",
-    "sv": "Swedish",
-    "no": "Norwegian",
-    "da": "Danish",
-    "fi": "Finnish",
-
-    # Other common
-    "pl": "Polish",
-    "tr": "Turkish",
-    "ar": "Arabic",
-    "hi": "Hindi",
-    "id": "Indonesian",
-    "th": "Thai",
-    "vi": "Vietnamese",
-
-    # Central / Eastern / misc.
-    "cs": "Czech",
-    "el": "Greek",
-    "ro": "Romanian",
-    "hu": "Hungarian",
-    "he": "Hebrew",
-    "uk": "Ukrainian",
-    "bg": "Bulgarian",
-
-    # Tagalog / Filipino
-    "tl": "Filipino",
-
-    # Fallback
-    "unknown": "Unknown",
-}
-
-
 def normalize_language_code(lang: Any) -> str:
     """Map short codes (en, jp, tl, ...) to human-readable language names."""
     if not isinstance(lang, str):
@@ -133,7 +69,7 @@ def normalize_language_code(lang: Any) -> str:
     else:
         code = lang.strip().lower() or "unknown"
 
-    label = _LANGUAGE_MAP.get(code)
+    label = tool_class.get_language_name(code)
     if label is not None:
         return label
 
@@ -192,7 +128,7 @@ def create_plotly_figure(img, title: str = "") -> Any:
     fig.update_yaxes(showticklabels=False)
     fig.update_layout(
         title=title,
-        margin=dict(l=0, r=0, t=40, b=0),
+        margin=dict(l=0, r=0, t=0, b=0),
     )
     return fig
 
@@ -334,17 +270,92 @@ def get_spacy_nlp(model_name: str = "en_core_web_sm"):
     return nlp
 
 
-def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[Set[str]] = None,
-                                 text_source: str = "both", model_name: str = "en_core_web_sm",
-                                 top_k: int = 30, extra_stopwords: Optional[Set[str]] = None) -> pd.DataFrame:
+def run_verb_lemma_wordcloud_pipeline(
+    data: Dict[str, Any],
+    text_source: str = "both",
+    model_name: str = "en_core_web_sm",
+    top_k: int = 200,
+) -> None:
     """
-    Count lemmas across videos using spaCy. Each lemma is counted
-    at most once per video.
+    Build a wordcloud of lemmatised words, restricted to verbs.
+
+    - Uses spaCy lemmas.
+    - Each lemma is counted at most once per video.
+    - Variants are collapsed via Tools.normalize_lemma_form.
+    - Result is cached in a PKL file for fast subsequent runs.
+    """
+    analysis_dir = os.path.join(common.output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    verb_pickle = os.path.join(
+        analysis_dir,
+        f"spacy_keywords_verbs_{text_source}.pkl",
+    )
+
+    if os.path.isfile(verb_pickle):
+        logger.info(f"Loading verb spaCy keyword counts from {verb_pickle}")
+        keyword_df = pd.read_pickle(verb_pickle)
+    else:
+        logger.info(
+            "No verb spaCy keyword pickle found; computing verb-only keyword counts..."
+        )
+        extra_stopwords = tool_class.get_custom_stopwords()
+        keyword_df = compute_spacy_keyword_counts(
+            data=data,
+            target_lemmas=None,
+            text_source=text_source,
+            model_name=model_name,
+            top_k=top_k,
+            extra_stopwords=extra_stopwords,
+            allowed_pos={"VERB"},
+        )
+        logger.info(f"Saving verb spaCy keyword counts to pickle {verb_pickle}")
+        keyword_df.to_pickle(verb_pickle)
+
+    if keyword_df.empty:
+        logger.warning("No verb lemmas found; skipping verb wordcloud.")
+        return
+
+    frequencies = dict(zip(keyword_df["lemma"], keyword_df["count"]))
+
+    img = plot_class.generate_wordcloud_from_frequencies(
+        frequencies=frequencies,
+        stopwords=tool_class.get_custom_stopwords(),
+    )
+
+    fig = create_plotly_figure(
+        img,
+        title="",
+    )
+    save_plotly_figure(
+        fig,
+        filename=f"wordcloud_verbs_{text_source}",
+    )
+
+
+def compute_spacy_keyword_counts(
+    data: Dict[str, Any],
+    target_lemmas: Optional[Set[str]] = None,
+    text_source: str = "both",
+    model_name: str = "en_core_web_sm",
+    top_k: int = 30,
+    extra_stopwords: Optional[Set[str]] = None,
+    allowed_pos: Optional[Set[str]] = None,
+) -> pd.DataFrame:
+    """
+    Count lemmas across videos using spaCy.
+
+    - Each lemma is counted at most once per video.
+    - Lemmas are normalised via Tools.normalize_lemma_form so that
+      variants (e.g. "whispers", "whispering") collapse to one key.
+    - If allowed_pos is provided (e.g. {"VERB"}), only those parts of
+      speech are considered.
     """
     nlp = get_spacy_nlp(model_name)
     if nlp is None:
         return pd.DataFrame(columns=["lemma", "count"])
 
+    # Build per-video texts
     texts: list[str] = []
     for _, info in data.items():
         title = info.get("title") or ""
@@ -355,7 +366,7 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
         elif text_source == "description":
             txt = description
         elif text_source == "both":
-            txt = f"{title} {description}"
+            txt = f"{title}\n{description}"
         else:
             raise ValueError(f"Unsupported text_source: {text_source!r}")
 
@@ -364,12 +375,17 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
     mode = "explicit" if target_lemmas else "auto-topk"
     logger.info(
         f"Running spaCy over {len(texts)} videos for lemma counts "
-        f"(text_source={text_source}, mode={mode})"
+        f"(text_source={text_source}, mode={mode}, allowed_pos={allowed_pos})"
     )
 
+    # Normalise target lemma set once
     if target_lemmas is not None:
-        target_lemmas = {w.lower() for w in target_lemmas}
+        target_lemmas = {
+            tool_class.normalize_lemma_form(w.lower())
+            for w in target_lemmas
+        }
 
+    # Lowercased extra stopwords
     if extra_stopwords is None:
         extra_stopwords_lc: Set[str] = set()
     else:
@@ -385,8 +401,9 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
                 continue
             if token.is_stop:
                 continue
+            if allowed_pos is not None and token.pos_ not in allowed_pos:
+                continue
 
-            # NEW: get raw lemma from spaCy, then normalize it
             raw_lemma = token.lemma_.lower()
             lemma = tool_class.normalize_lemma_form(raw_lemma)
 
@@ -406,24 +423,15 @@ def compute_spacy_keyword_counts(data: Dict[str, Any], target_lemmas: Optional[S
                 counts[lemma] += 1
 
     if not counts:
-        if target_lemmas is not None:
-            logger.warning(
-                f"No occurrences found for target lemmas: {sorted(target_lemmas)}"
-            )
-        else:
-            logger.warning("No eligible lemmas found in corpus.")
+        logger.warning("No lemmas counted; returning empty keyword table.")
         return pd.DataFrame(columns=["lemma", "count"])
 
-    if target_lemmas is None:
-        counts = Counter(dict(counts.most_common(top_k)))
+    df = pd.DataFrame(
+        {"lemma": list(counts.keys()), "count": list(counts.values())}
+    ).sort_values("count", ascending=False)
 
-    df = (
-        pd.DataFrame(
-            {"lemma": list(counts.keys()), "count": list(counts.values())}
-        )
-        .sort_values("count", ascending=False)
-        .reset_index(drop=True)
-    )
+    if top_k is not None:
+        df = df.head(top_k)
 
     logger.info(
         "Top spaCy keyword lemmas (first 10 rows):\n"
@@ -659,10 +667,10 @@ def add_theme_flags(df: pd.DataFrame, model_name: str = "en_core_web_sm", text_s
         if not has_drive and any(
             phrase in lower_text
             for phrase in [
-                "driving asmr",
+                "driving",
                 "drive with me",
-                "car asmr",
-                "road trip asmr",
+                "car",
+                "road trip",
             ]
         ):
             has_drive = True
@@ -785,11 +793,29 @@ def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] =
         df["views"] / df["days_since_upload"],
         np.nan,
     )
+    df["likes_per_day"] = np.where(
+        df["days_since_upload"] > 0,
+        df["likes"] / df["days_since_upload"],
+        np.nan,
+    )
     df["rel_views_vs_channel_avg"] = np.where(
         (df["channel_average_views"] > 0)
         & df["channel_average_views"].notna(),
         df["views"] / df["channel_average_views"],
         np.nan,
+    )
+
+    # ---- NEW: log10-transformed metrics for use in tables ----
+    df["log10_views"] = np.where(df["views"] > 0, np.log10(df["views"]), np.nan)
+    df["log10_views_per_day"] = np.where(
+        df["views_per_day"] > 0, np.log10(df["views_per_day"]), np.nan
+    )
+    df["log10_likes"] = np.where(df["likes"] > 0, np.log10(df["likes"]), np.nan)
+    df["log10_likes_per_day"] = np.where(
+        df["likes_per_day"] > 0, np.log10(df["likes_per_day"]), np.nan
+    )
+    df["log10_engagement_rate"] = np.where(
+        df["engagement_rate"] > 0, np.log10(df["engagement_rate"]), np.nan
     )
 
     df["upload_year"] = df["upload_datetime"].dt.year  # type: ignore
@@ -818,8 +844,6 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
     - labeled cluster centroids
     - extensive logger output to interpret clusters
     """
-
-    import plotly.graph_objects as go
 
     # Require necessary columns
     if {"cluster", "embedding_x", "embedding_y"} - set(df.columns):
@@ -879,7 +903,13 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
                 x=grp["embedding_x"],
                 y=grp["embedding_y"],
                 mode="markers",
-                marker=dict(size=5, color=color_map[str(cid)], opacity=0.55),
+                marker=dict(
+                    size=7,  # bigger dots
+                    color=color_map[str(cid)],
+                    opacity=0.3,
+                    # thin outline to make markers pop a bit more
+                    line=dict(width=0.5, color="rgba(0,0,0,0.4)"),
+                ),
                 name=f"Cluster {cid}",
                 text=grp.get("title", "").fillna(""),  # type: ignore
                 hovertemplate="<b>%{text}</b><br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>",
@@ -930,9 +960,13 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
             dict(
                 type="path",
                 path=path,
-                line=dict(color=color_map[str(cid)], width=2, dash="dot"),
+                line=dict(
+                    color="black",
+                    width=4,        # thicker line
+                    dash="dot",
+                ),
                 fillcolor="rgba(0,0,0,0)",
-                opacity=0.4,
+                opacity=1,      # more visible
             )
         )
 
@@ -942,13 +976,17 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
                 label = chr(65 + cid)  # type: ignore
             else:
                 label = f"C{cid}"
+
+            # make it bold and bigger
+            label_html = f"<b>{label}</b>"
+
             fig.add_trace(
                 go.Scatter(
                     x=[cx],
                     y=[cy],
                     mode="text",
-                    text=[label],
-                    textfont=dict(size=24, color="black"),
+                    text=[label_html],
+                    textfont=dict(size=30, color="black"),
                     showlegend=False,
                 )
             )
@@ -958,11 +996,12 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
     fig.update_layout(
         width=1200,
         height=900,
-        title="t-SNE Cluster Map",
+        title="",
         plot_bgcolor="white",
         paper_bgcolor="white",
         xaxis_title="",
         yaxis_title="",
+        showlegend=False
     )
 
     save_plotly_figure(
@@ -975,7 +1014,10 @@ def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", lab
 
 
 def summarize_by_duration_bucket(df: pd.DataFrame) -> pd.DataFrame:
-    """Duration bucket table (using fixed duration buckets)."""
+    """
+    Duration-bucket level stats: mean(SD) for views, likes,
+    views/day, likes/day, engagement rate + same in log10.
+    """
     df_copy = df.copy()
 
     bucket_order = [
@@ -997,15 +1039,46 @@ def summarize_by_duration_bucket(df: pd.DataFrame) -> pd.DataFrame:
         df_copy.groupby("duration_bucket")
         .agg(
             video_count=("video_id", "count"),
+
+            mean_duration_minutes=("duration_minutes", "mean"),
+            sd_duration_minutes=("duration_minutes", "std"),
+
             mean_views=("views", "mean"),
+            sd_views=("views", "std"),
             median_views=("views", "median"),
+
             mean_views_per_day=("views_per_day", "mean"),
+            sd_views_per_day=("views_per_day", "std"),
+
+            mean_likes=("likes", "mean"),
+            sd_likes=("likes", "std"),
+
+            mean_likes_per_day=("likes_per_day", "mean"),
+            sd_likes_per_day=("likes_per_day", "std"),
+
             mean_engagement_rate=("engagement_rate", "mean"),
+            sd_engagement_rate=("engagement_rate", "std"),
+
+            mean_log10_views=("log10_views", "mean"),
+            sd_log10_views=("log10_views", "std"),
+
+            mean_log10_views_per_day=("log10_views_per_day", "mean"),
+            sd_log10_views_per_day=("log10_views_per_day", "std"),
+
+            mean_log10_likes=("log10_likes", "mean"),
+            sd_log10_likes=("log10_likes", "std"),
+
+            mean_log10_likes_per_day=("log10_likes_per_day", "mean"),
+            sd_log10_likes_per_day=("log10_likes_per_day", "std"),
+
+            mean_log10_engagement_rate=("log10_engagement_rate", "mean"),
+            sd_log10_engagement_rate=("log10_engagement_rate", "std"),
         )
         .reset_index()
     )
+
     logger.info(
-        "Duration bucket summary table:\n"
+        "Duration bucket summary table (raw + log10):\n"
         f"{agg.to_string(index=False)}"
     )
     return agg
@@ -1018,8 +1091,14 @@ def summarize_by_language(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             video_count=("video_id", "count"),
             mean_views=("views", "mean"),
+            sd_views=("views", "std"),
             median_views=("views", "median"),
             mean_views_per_day=("views_per_day", "mean"),
+            sd_views_per_day=("views_per_day", "std"),
+            mean_likes=("likes", "mean"),
+            sd_likes=("likes", "std"),
+            mean_likes_per_day=("likes_per_day", "mean"),
+            sd_likes_per_day=("likes_per_day", "std"),
             mean_engagement_rate=("engagement_rate", "mean"),
         )
         .reset_index()
@@ -1054,10 +1133,18 @@ def summarize_title_styles(df: pd.DataFrame) -> pd.DataFrame:
         .agg(
             video_count=("video_id", "count"),
             mean_views=("views", "mean"),
+            sd_views=("views", "std"),
+            mean_views_per_day=("views_per_day", "mean"),
+            sd_views_per_day=("views_per_day", "std"),
+            mean_likes=("likes", "mean"),
+            sd_likes=("likes", "std"),
+            mean_likes_per_day=("likes_per_day", "mean"),
+            sd_likes_per_day=("likes_per_day", "std"),
             mean_engagement_rate=("engagement_rate", "mean"),
         )
         .reset_index()
     )
+
     logger.info(
         "Title length bucket summary:\n"
         f"{agg.to_string(index=False)}"
@@ -1077,6 +1164,132 @@ def summarize_theme_vs_growth(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
     )
     logger.info(
         f"views_per_day summary by {theme_col} flag:\n"
+        f"{agg.to_string(index=False)}"
+    )
+    return agg
+
+
+def summarize_by_theme_category(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
+    """
+    Per theme flag (False / True):
+    mean(SD) for views, likes, views/day, likes/day, engagement_rate
+    and their log10-transformed versions.
+    """
+    if theme_col not in df.columns:
+        raise ValueError(f"Unknown theme column: {theme_col}")
+
+    agg = (
+        df.groupby(theme_col)
+        .agg(
+            video_count=("video_id", "count"),
+
+            mean_views=("views", "mean"),
+            sd_views=("views", "std"),
+
+            mean_views_per_day=("views_per_day", "mean"),
+            sd_views_per_day=("views_per_day", "std"),
+
+            mean_likes=("likes", "mean"),
+            sd_likes=("likes", "std"),
+
+            mean_likes_per_day=("likes_per_day", "mean"),
+            sd_likes_per_day=("likes_per_day", "std"),
+
+            mean_engagement_rate=("engagement_rate", "mean"),
+            sd_engagement_rate=("engagement_rate", "std"),
+
+            mean_log10_views=("log10_views", "mean"),
+            sd_log10_views=("log10_views", "std"),
+
+            mean_log10_views_per_day=("log10_views_per_day", "mean"),
+            sd_log10_views_per_day=("log10_views_per_day", "std"),
+
+            mean_log10_likes=("log10_likes", "mean"),
+            sd_log10_likes=("log10_likes", "std"),
+
+            mean_log10_likes_per_day=("log10_likes_per_day", "mean"),
+            sd_log10_likes_per_day=("log10_likes_per_day", "std"),
+
+            mean_log10_engagement_rate=("log10_engagement_rate", "mean"),
+            sd_log10_engagement_rate=("log10_engagement_rate", "std"),
+        )
+        .reset_index()
+    )
+
+    logger.info(
+        f"Thematic summary (raw + log10) for {theme_col} (False/True):\n"
+        f"{agg.to_string(index=False)}"
+    )
+    return agg
+
+
+def summarize_theme_by_duration_bucket(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
+    """
+    For a given theme flag, summarise stats by (theme, duration_bucket):
+    mean(SD) for views, likes, views/day, likes/day, engagement_rate
+    and their log10 versions.
+    """
+    if theme_col not in df.columns:
+        raise ValueError(f"Unknown theme column: {theme_col}")
+    if "duration_bucket" not in df.columns:
+        raise ValueError("Column 'duration_bucket' is missing from DataFrame.")
+
+    df_copy = df.copy()
+
+    bucket_order = [
+        "under_10min",
+        "10_to_30min",
+        "30_to_60min",
+        "60_to_180min",
+        "over_180min",
+        "unknown",
+    ]
+    df_copy["duration_bucket"] = pd.Categorical(
+        df_copy["duration_bucket"],
+        categories=bucket_order,
+        ordered=True,
+    )
+
+    agg = (
+        df_copy.groupby([theme_col, "duration_bucket"])
+        .agg(
+            video_count=("video_id", "count"),
+
+            mean_views=("views", "mean"),
+            sd_views=("views", "std"),
+
+            mean_views_per_day=("views_per_day", "mean"),
+            sd_views_per_day=("views_per_day", "std"),
+
+            mean_likes=("likes", "mean"),
+            sd_likes=("likes", "std"),
+
+            mean_likes_per_day=("likes_per_day", "mean"),
+            sd_likes_per_day=("likes_per_day", "std"),
+
+            mean_engagement_rate=("engagement_rate", "mean"),
+            sd_engagement_rate=("engagement_rate", "std"),
+
+            mean_log10_views=("log10_views", "mean"),
+            sd_log10_views=("log10_views", "std"),
+
+            mean_log10_views_per_day=("log10_views_per_day", "mean"),
+            sd_log10_views_per_day=("log10_views_per_day", "std"),
+
+            mean_log10_likes=("log10_likes", "mean"),
+            sd_log10_likes=("log10_likes", "std"),
+
+            mean_log10_likes_per_day=("log10_likes_per_day", "mean"),
+            sd_log10_likes_per_day=("log10_likes_per_day", "std"),
+
+            mean_log10_engagement_rate=("log10_engagement_rate", "mean"),
+            sd_log10_engagement_rate=("log10_engagement_rate", "std"),
+        )
+        .reset_index()
+    )
+
+    logger.info(
+        f"{theme_col} × duration_bucket summary (raw + log10):\n"
         f"{agg.to_string(index=False)}"
     )
     return agg
@@ -1188,10 +1401,18 @@ def compute_seasonal_sleep_pattern(df: pd.DataFrame) -> pd.DataFrame:
     return agg
 
 
-def compute_lemma_trend_over_time(df: pd.DataFrame, lemma_name: str, lemma_targets: Set[str],
-                                  text_source: str = "both", model_name: str = "en_core_web_sm") -> pd.DataFrame:
+def compute_lemma_trend_over_time(
+    df: pd.DataFrame,
+    lemma_name: str,
+    lemma_targets: Set[str],
+    text_source: str = "both",
+    model_name: str = "en_core_web_sm",
+) -> pd.DataFrame:
     """
     Number of videos per year containing any of the given lemmas.
+
+    Lemmas are normalised via Tools.normalize_lemma_form so that
+    variants (e.g. "relaxation", "relaxing") all count as one.
     """
     nlp = get_spacy_nlp(model_name)
     if nlp is None:
@@ -1204,17 +1425,21 @@ def compute_lemma_trend_over_time(df: pd.DataFrame, lemma_name: str, lemma_targe
     texts = get_text_series(df_tmp, text_source=text_source).tolist()
     years = df_tmp["upload_year"].tolist()
 
-    lemma_targets = {le.lower() for le in lemma_targets}
+    # Normalise target lemmas once
+    lemma_targets_norm = {
+        tool_class.normalize_lemma_form(le.lower())
+        for le in lemma_targets
+    }
 
     records: list[tuple[int, bool]] = []
 
     for year, doc in zip(years, nlp.pipe(texts, batch_size=256)):
         lemma_set = {
-            tok.lemma_.lower()
+            tool_class.normalize_lemma_form(tok.lemma_.lower())
             for tok in doc
             if tok.is_alpha and not tok.is_stop
         }
-        has_lemma = bool(lemma_set & lemma_targets)
+        has_lemma = bool(lemma_set & lemma_targets_norm)
         records.append((year, has_lemma))
 
     if not records:
@@ -1244,7 +1469,7 @@ def compute_lemma_trend_over_time(df: pd.DataFrame, lemma_name: str, lemma_targe
     return trend
 
 
-def cluster_videos(df: pd.DataFrame, n_clusters: int = 10, random_state: int = 42,
+def cluster_videos(df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
                    text_source: str = "both") -> Tuple[pd.DataFrame, Optional[Pipeline], Optional[pd.DataFrame]]:
     """Cluster videos using title/description text, duration, engagement, and language."""
     df_copy = df.copy()
@@ -1356,6 +1581,136 @@ def cluster_videos(df: pd.DataFrame, n_clusters: int = 10, random_state: int = 4
     return df_copy, pipeline, pca_info
 
 
+def compute_kmeans_elbow(
+    df: pd.DataFrame,
+    k_values: range,
+    text_source: str = "both",
+    random_state: int = 42,
+) -> pd.DataFrame:
+    """
+    Compute KMeans inertia (SSE) for a range of k using the same
+    feature setup as `cluster_videos`, and save an elbow plot.
+
+    Returns a DataFrame with columns: k, inertia.
+    """
+
+    # --- Build the same feature matrix as in cluster_videos ---
+    df_copy = df.copy()
+    df_copy["text_all"] = get_text_series(df_copy, text_source=text_source)
+
+    feature_cols = [
+        "text_all",
+        "duration_minutes",
+        "engagement_rate",
+        "views_per_day",
+        "language",
+    ]
+
+    # Ensure numeric columns are numeric
+    for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
+        df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
+
+    # ColumnTransformer identical to cluster_videos
+    preprocess = ColumnTransformer(
+        transformers=[
+            (
+                "text",
+                TfidfVectorizer(
+                    max_features=5000,
+                    ngram_range=(1, 2),
+                    min_df=5,
+                ),
+                "text_all",
+            ),
+            (
+                "numeric",
+                StandardScaler(with_mean=False),
+                ["duration_minutes", "engagement_rate", "views_per_day"],
+            ),
+            (
+                "lang",
+                OneHotEncoder(handle_unknown="ignore"),
+                ["language"],
+            ),
+        ],
+        remainder="drop",
+    )
+
+    X_raw = df_copy[feature_cols]
+
+    logger.info(
+        f"Fitting preprocessing for elbow curve on {len(df_copy)} videos "
+        f"(text_source={text_source})"
+    )
+    X_features = preprocess.fit_transform(X_raw)
+
+    # --- Loop over k and compute inertia ---
+    records = []
+    for k in k_values:
+        logger.info(f"[Elbow] Fitting KMeans for k={k} ...")
+        km = KMeans(
+            n_clusters=k,
+            random_state=random_state,
+            n_init=10,
+        )
+        km.fit(X_features)
+        inertia = km.inertia_
+        logger.info(f"[Elbow] k={k}: inertia={inertia:,.2f}")
+        records.append({"k": k, "inertia": inertia})
+
+    results = pd.DataFrame(records)
+
+    # --- Plot inertia vs k with Plotly and your styling ---
+    fig = px.line(
+        results,
+        x="k",
+        y="inertia",
+        markers=True,
+        title="",
+    )
+    fig.update_traces(mode="lines+markers")
+
+    save_plotly_figure(
+        fig,
+        filename=f"kmeans_elbow_{text_source}",
+        width=1200,
+        height=700,
+        scale=3,
+    )
+
+    return results
+
+
+def run_elbow_analysis(text_source: str = "both") -> None:
+    analysis_dir = os.path.join(common.output_dir, "analysis")
+    enriched_pickle = os.path.join(
+        analysis_dir,
+        f"asmr_videos_enriched_{text_source}.pkl",
+    )
+
+    if os.path.isfile(enriched_pickle):
+        logger.info(f"Loading enriched dataset from pickle {enriched_pickle}")
+        df = pd.read_pickle(enriched_pickle)
+    else:
+        logger.info("No enriched pickle found; building DataFrame from JSON...")
+        json_path = common.get_configs("asmr_json_path")
+        data = load_asmr_data(json_path)
+        df = json_to_dataframe(data, text_source=text_source)
+
+    # Backfill likes_per_day for older pickles if needed
+    if "likes_per_day" not in df.columns and "days_since_upload" in df.columns:
+        df["likes_per_day"] = np.where(
+            df["days_since_upload"] > 0,
+            df["likes"] / df["days_since_upload"],
+            np.nan,
+        )
+
+    k_values = range(4, 21)  # for example, k = 4..20
+    elbow_df = compute_kmeans_elbow(df, k_values, text_source=text_source)
+
+    logger.info("Elbow results:\n%s", elbow_df.to_string(index=False))
+
+
 # ---------------------------------------------------------------------------
 # Plotly figure helpers for analytics
 # ---------------------------------------------------------------------------
@@ -1402,13 +1757,27 @@ def plot_duration_vs_views(df: pd.DataFrame) -> None:
         bins="log",
         mincnt=1,
     )
-    cb = fig.colorbar(hb, ax=ax)
-    cb.set_label("")
+    # Colorbar: control size + font sizes
+    cb = fig.colorbar(
+        hb,
+        ax=ax,
+        shrink=0.9,   # < 1.0 = shorter, > 1.0 = longer
+        aspect=30,    # larger = thinner bar, smaller = thicker bar
+    )
+    cb.set_label("")   # colorbar label size
+    cb.ax.tick_params(labelsize=14)       # colorbar tick label size
 
     ax.set_xscale("log")
     ax.set_yscale("log")
-    ax.set_xlabel("Duration (seconds)")
-    ax.set_ylabel("Views")
+
+    # Bigger axis labels
+    ax.set_xlabel("Duration (seconds)", fontsize=16)
+    ax.set_ylabel("Views", fontsize=16)
+
+    # Bigger tick labels
+    ax.tick_params(axis="both", which="major", labelsize=14)
+    ax.tick_params(axis="both", which="minor", labelsize=12)
+
     ax.set_title("")
 
     fig.tight_layout()
@@ -1761,6 +2130,16 @@ def plot_language_growth(lang_growth: pd.DataFrame, min_total_videos: int = 50) 
             "language": "Language",
         },
     )
+
+    # Make the dots bigger
+    fig.update_traces(
+        mode="lines+markers",
+        marker=dict(
+            size=10,        # increase this number for larger dots (e.g. 8, 10, 12)
+            line=dict(width=1),
+        ),
+    )
+
     save_plotly_figure(
         fig,
         "language_growth_over_years",
@@ -1803,6 +2182,15 @@ def plot_theme_trend_overall(trend_df: pd.DataFrame, theme_col: str) -> None:
         },
         markers=True,
     )
+
+    fig.update_traces(
+        mode="lines+markers",
+        marker=dict(
+            size=10,        # increase this number for larger dots (e.g. 8, 10, 12)
+            line=dict(width=1),
+        ),
+    )
+
     filename = f"{theme_col}_trend_overall_fig"
     save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
 
@@ -2064,7 +2452,7 @@ def plot_cluster_distribution(
     )
 
 
-def cluster_videos_tsne(df: pd.DataFrame, n_clusters: int = 10, random_state: int = 42, text_source: str = "both",
+def cluster_videos_tsne(df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42, text_source: str = "both",
                         tsne_perplexity: float = 30.0, tsne_learning_rate: float = 200.0,
                         tsne_n_iter: int = 1000) -> Tuple[pd.DataFrame, Optional[Pipeline]]:
     """
@@ -2210,7 +2598,7 @@ def describe_clusters(clustered_df: pd.DataFrame, top_n_languages: int = 3) -> p
             "n_videos": len(group),
         }
 
-        for col in ["views", "views_per_day", "duration_minutes", "engagement_rate"]:
+        for col in ["views", "views_per_day", "likes", "likes_per_day", "duration_minutes", "engagement_rate"]:
             if col in group.columns:
                 row[f"mean_{col}"] = float(group[col].mean(skipna=True))
 
@@ -2308,6 +2696,15 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
     else:
         logger.info("Views-per-day statistics: not available.")
 
+    if "likes_per_day" in df.columns and df["likes_per_day"].notna().any():
+        mean_lpd = df["likes_per_day"].mean()
+        std_lpd = df["likes_per_day"].std()
+        logger.info(
+            f"Likes per day: mean = {mean_lpd:.2f}, SD = {std_lpd:.2f}"
+        )
+    else:
+        logger.info("Likes-per-day statistics: not available.")
+
     logger.info("===== END DATASET SUMMARY =====")
 
 
@@ -2374,6 +2771,22 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
                 os.path.join(analysis_dir, f"{theme}_growth_stats.csv"),
                 index=False,
             )
+
+    # NEW: per-theme and theme × duration summaries in raw + log10 scale
+    for theme in ["has_whisper", "has_no_talking", "has_sleep", "has_binaural", "has_drive"]:
+        if theme in df.columns:
+            theme_cat_stats = summarize_by_theme_category(df, theme)
+            theme_cat_stats.to_csv(
+                os.path.join(analysis_dir, f"{theme}_summary_raw_log.csv"),
+                index=False,
+            )
+
+            theme_duration_stats = summarize_theme_by_duration_bucket(df, theme)
+            theme_duration_stats.to_csv(
+                os.path.join(analysis_dir, f"{theme}_by_duration_summary_raw_log.csv"),
+                index=False,
+            )
+
             plot_theme_growth_box(df, theme)
 
     monthly_counts = compute_monthly_video_counts(df)
@@ -2425,9 +2838,35 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         )
         plot_theme_trend_overall(drive_trend, theme_col="drive")
 
-    clustered_df, pipeline, pca_info = cluster_videos(
-        df, n_clusters=12, text_source=text_source
+    # ------------------------------------------------------------------
+    # KMeans clustering (PCA embedding) with PKL caching
+    # ------------------------------------------------------------------
+    cluster_pickle = os.path.join(
+        analysis_dir,
+        f"asmr_videos_with_clusters_{text_source}.pkl",
     )
+
+    if os.path.isfile(cluster_pickle):
+        logger.info(f"Loading clustered dataset from pickle {cluster_pickle}")
+        clustered_df = pd.read_pickle(cluster_pickle)
+        pipeline = None
+        pca_info = None
+    else:
+        logger.info("No clustered pickle found; running KMeans clustering...")
+        clustered_df, pipeline, pca_info = cluster_videos(
+            df, n_clusters=11, text_source=text_source
+        )
+        logger.info(f"Saving clustered dataset to pickle {cluster_pickle}")
+        clustered_df.to_pickle(cluster_pickle)
+
+    # Backfill likes_per_day on clustered_df if needed
+    if "likes_per_day" not in clustered_df.columns and "days_since_upload" in clustered_df.columns:
+        clustered_df["likes_per_day"] = np.where(
+            clustered_df["days_since_upload"] > 0,
+            clustered_df["likes"] / clustered_df["days_since_upload"],
+            np.nan,
+        )
+
     clustered_csv = os.path.join(analysis_dir, "asmr_videos_with_clusters.csv")
     clustered_df.to_csv(
         clustered_csv,
@@ -2441,12 +2880,19 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
             .agg(
                 video_count=("video_id", "count"),
                 mean_views=("views", "mean"),
+                sd_views=("views", "std"),
                 median_views=("views", "median"),
                 mean_views_per_day=("views_per_day", "mean"),
+                sd_views_per_day=("views_per_day", "std"),
+                mean_likes=("likes", "mean"),
+                sd_likes=("likes", "std"),
+                mean_likes_per_day=("likes_per_day", "mean"),
+                sd_likes_per_day=("likes_per_day", "std"),
                 mean_duration_minutes=("duration_minutes", "mean"),
             )
             .reset_index()
         )
+
         cluster_summary_csv = os.path.join(analysis_dir, "cluster_summary.csv")
         cluster_summary.to_csv(cluster_summary_csv, index=False)
         logger.info(
@@ -2486,15 +2932,42 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         # Stable colors; highlight_cluster can be set here if desired
         plot_cluster_distribution(clustered_df, name_suffix="pca")
 
-        clustered_tsne_df, tsne_pipeline = cluster_videos_tsne(
-            df, n_clusters=12, text_source=TEXT_SOURCE
+    #     # ------------------------------------------------------------------
+    #     # t-SNE embedding of clusters with PKL caching
+    #     # ------------------------------------------------------------------
+        tsne_cluster_pickle = os.path.join(
+            analysis_dir,
+            f"asmr_videos_with_clusters_tsne_{text_source}.pkl",
         )
+
+        if os.path.isfile(tsne_cluster_pickle):
+            logger.info(
+                f"Loading t-SNE clustered dataset from pickle {tsne_cluster_pickle}"
+            )
+            clustered_tsne_df = pd.read_pickle(tsne_cluster_pickle)
+        else:
+            logger.info(
+                "No t-SNE clustered pickle found; computing t-SNE embedding..."
+            )
+            clustered_tsne_df, tsne_pipeline = cluster_videos_tsne(
+                df, n_clusters=11, text_source=TEXT_SOURCE
+            )
+            logger.info(
+                f"Saving t-SNE clustered dataset to pickle {tsne_cluster_pickle}"
+            )
+            clustered_tsne_df.to_pickle(tsne_cluster_pickle)
+
         plot_tsne_research(clustered_tsne_df)
 
-        tsne_embedding_csv = os.path.join(analysis_dir, "cluster_embedding_2d_tsne.csv")
+        tsne_embedding_csv = os.path.join(
+            analysis_dir,
+            "cluster_embedding_2d_tsne.csv",
+        )
         if {"embedding_x", "embedding_y"}.issubset(clustered_tsne_df.columns):
             clustered_tsne_df[emb_cols].to_csv(tsne_embedding_csv, index=False)
-            logger.info(f"2D t-SNE embedding for clusters saved to {tsne_embedding_csv}")
+            logger.info(
+                f"2D t-SNE embedding for clusters saved to {tsne_embedding_csv}"
+            )
 
         plot_cluster_distribution(clustered_tsne_df, name_suffix="tsne")
 
@@ -2515,7 +2988,16 @@ def main() -> None:
     analysis_dir = os.path.join(common.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
 
+    # Existing raw-text wordcloud
     run_wordcloud_pipeline(data, text_source=TEXT_SOURCE)
+
+    # verb-only lemma wordcloud (cached)
+    run_verb_lemma_wordcloud_pipeline(
+        data,
+        text_source=TEXT_SOURCE,
+        model_name="en_core_web_sm",
+        top_k=200,
+    )
 
     keyword_pickle = os.path.join(
         analysis_dir,
@@ -2544,6 +3026,7 @@ def main() -> None:
     )
 
     run_analytics_pipeline(data, text_source=TEXT_SOURCE)
+    run_elbow_analysis(text_source=TEXT_SOURCE)
 
 
 if __name__ == "__main__":
