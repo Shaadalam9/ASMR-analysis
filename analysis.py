@@ -2824,12 +2824,10 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
             plot_theme_trend_overall(trend_all, theme)
             plot_theme_trend_by_language(trend_lang, theme)
 
-    drive_trend = compute_lemma_trend_over_time(
+    drive_trend = compute_theme_trend_over_time(
         df,
-        lemma_name="drive",
-        lemma_targets={"drive"},
-        text_source=text_source,
-        model_name="en_core_web_sm",
+        theme_col="has_drive",
+        by_language=False,
     )
     if not drive_trend.empty:
         drive_trend.to_csv(

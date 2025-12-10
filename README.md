@@ -107,18 +107,16 @@ Configuration of the project needs to be defined in `config`. Please use the `de
 - **`plotly_template`**: Defines the template for Plotly figures.
 - **`logger_level`**: Level of console output. Can be: debug, info, warning, error.
 
-### Results
+## Results
 
 ### Word clouds
 
-[![Word cloud of ASMR video titles](figures/wordcloud_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_title.html)  
-Word cloud of ASMR video titles, generated from the collected dataset. More frequent terms appear larger, highlighting common themes and patterns in how creators title their ASMR videos.
-
-[![Word cloud of ASMR video descriptions](figures/wordcloud_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_description.html)  
-Word cloud of ASMR video descriptions, showing the most frequent terms used in the textual descriptions accompanying ASMR videos. This highlights how creators describe, contextualize, and promote their content.
 
 [![Word cloud of ASMR video titles and descriptions](figures/wordcloud_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_both.html)  
 Combined word cloud of ASMR video titles and descriptions, offering a holistic view of the most frequent terms across both fields. The visualization summarizes the overarching themes and stylistic patterns in the dataset.
+
+[![Word cloud of verb lemmas in ASMR titles and descriptions](figures/wordcloud_verbs_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_both.html)  
+Word cloud restricted to verb lemmas extracted from ASMR video titles and descriptions using spaCy. Each verb is counted at most once per video, highlighting common actions (e.g., whispering, tapping, driving) that characterize ASMR triggers and role-play interactions.
 
 ---
 
@@ -197,17 +195,20 @@ Yearly counts of ASMR uploads by language (for languages with enough data). This
 [![Number of no-talking videos over time](figures/has_no_talking_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_overall_fig.html)  
 Number of videos tagged as “no talking” (or similar) per year, aggregated across all languages. This shows whether no-talking ASMR has become more or less prevalent over time.
 
-[![Number of no-talking videos over time by language](figures/has_no_talking_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_by_language_fig.html)  
-Number of “no talking” ASMR videos per year, broken down by language. This highlights cross-lingual differences in the adoption of no-talking formats.
 
 [![Number of binaural videos over time](figures/has_binaural_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_overall_fig.html)  
 Number of videos with “binaural” (and related) keywords per year, aggregated across languages. This plot reveals when binaural ASMR started to gain traction and how its prevalence has evolved.
 
-[![Number of binaural videos over time by language](figures/has_binaural_trend_by_language_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_by_language_fig.html)  
-Number of binaural ASMR videos per year, broken down by language, illustrating how different language communities adopted binaural production techniques.
 
 [![Number of drive-themed videos over time](figures/drive_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/drive_trend_overall_fig.html)  
-Number of videos whose text mentions “drive” (lemma-based) per year. This captures the rise (or lack thereof) of driving-themed ASMR content over time.
+Visualisation of the yearly count of ASMR videos whose title or description includes the lemma “drive” (e.g., driving / road-trip role-plays).
+
+---
+
+### Choosing the number of clusters (elbow method)
+
+[![K-means elbow curve for ASMR video clustering](figures/kmeans_elbow_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/kmeans_elbow_both.html)  
+Elbow plot of K-means inertia (within-cluster sum of squared errors) for \(k\) from 4 to 20, using title+description text, duration, engagement metrics, and language features. The curve shows diminishing returns in inertia reduction beyond about \(k = 11\), which we therefore select as the final number of clusters.
 
 ---
 
@@ -226,5 +227,18 @@ Mean views per day for each cluster (PCA-based clustering), comparing typical gr
 
 ### Alternative t-SNE embedding of clusters
 
+[![Cluster sizes (t-SNE variant)](figures/cluster_sizes_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_tsne.html)  
+Number of videos per cluster when using the same K-means solution but visualised with a t-SNE-based embedding. This summarises how large each content cluster is under the t-SNE variant.
+
+[![Mean views per day by cluster (t-SNE variant)](figures/cluster_mean_views_per_day_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_tsne.html)  
+Mean views per day for each cluster under the t-SNE embedding, highlighting which content clusters tend to grow faster or slower, independent of the specific 2D embedding used for visualisation.
+
 [![2D t-SNE embedding of ASMR video clusters](figures/cluster_scatter_embedding_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_tsne.html)  
 2D t-SNE embedding of the same clustered videos, providing an alternative nonlinear view of the ASMR content space. Compared to PCA, t-SNE can highlight tighter local groupings at the cost of less interpretable global geometry.
+
+---
+
+### Research-style t-SNE embedding with cluster ellipses
+
+[![Research-style t-SNE embedding with cluster ellipses](figures/cluster_tsne_research_tsne_research.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_tsne_research_tsne_research.html)  
+Research-style 2D t-SNE embedding of ASMR videos with clusters indicated by coloured points and dotted ellipse contours. Cluster labels mark approximate centroids, making it easier to inspect how languages, themes, and growth patterns align with different regions of the ASMR content space.
