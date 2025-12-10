@@ -37,5 +37,7 @@ class CustomLogger:
 
     def log(self, level, msg, *args, **kwargs):
         if self.logger.isEnabledFor(level):
-            msg = msg.format(*args)
+            # ONLY apply .format() if args were passed
+            if args:
+                msg = msg.format(*args)
             self.logger._log(level, msg, args=(), **kwargs)

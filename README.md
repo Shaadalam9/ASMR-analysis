@@ -99,13 +99,53 @@ python3 analysis.py
 ```
 
 ### Configuration of project
-Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used. The config file has the following parameters:
-- **`data`**: Path to the directory containing the project’s data files.
-- **`query`**: The search query string used to discover videos (e.g., "ASMR", "ASMR roleplay", etc.).
-- **`font_family`**: Specifies the font family to be used in outputs.
-- **`font_size`**: Specifies the font size to be used in outputs.
-- **`plotly_template`**: Defines the template for Plotly figures.
-- **`logger_level`**: Level of console output. Can be: debug, info, warning, error.
+
+Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used.
+
+The config file has the following parameters:
+
+- **`data`**  
+  Path to the directory containing the project’s data files (e.g., `data`).
+
+- **`query`**  
+  The search query string used to discover videos (e.g., `"ASMR"`, `"ASMR roleplay"`, etc.).
+
+- **`analysis_text_source`**  
+  Controls which textual fields are used in text-based analyses and visualisations.  
+  Valid values:
+  - `"title"` – use video titles only  
+  - `"description"` – use video descriptions only  
+  - `"both"` – use titles and descriptions concatenated (default)
+
+- **`date_before`**  
+  Optional upper bound on video upload date in ISO format (`YYYY-MM-DD`).  
+  When set, only videos uploaded *on or before* this date are included.  
+  If left as the placeholder string `"YYYY-MM-DD"`, it is treated as unset.
+
+- **`date_after`**  
+  Optional lower bound on video upload date in ISO format (`YYYY-MM-DD`).  
+  When set, only videos uploaded *on or after* this date are included.  
+  If left as the placeholder string `"YYYY-MM-DD"`, it is treated as unset.
+
+- **`date_window_months`**  
+  Size (in months) of the relative time window used when explicit `date_before` / `date_after` bounds are not provided. This is used by the collection/analysis pipeline to restrict the dataset to a recent window instead of the full historical range.
+
+- **`font_family`**  
+  Font family used in figures (e.g., Plotly and Matplotlib outputs), such as `"Libertine"`.
+
+- **`font_size`**  
+  Base font size used in figures (axis labels, titles, legends, etc.).
+
+- **`plotly_template`**  
+  Name of the Plotly template to use for all interactive figures (e.g., `"plotly_white"`).
+
+- **`logger_level`**  
+  Verbosity level of console logging. Valid values are:
+  - `"debug"`
+  - `"info"`
+  - `"warning"`
+  - `"error"`
+
 
 ## Results
 

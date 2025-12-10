@@ -1,35 +1,22 @@
-import json
-import logging
+from custom_logger import CustomLogger
+from logmod import logs
 import os
-import shutil
 import warnings
-from collections import Counter
-from datetime import datetime, timezone
-from typing import Any, Dict, Optional, Set, Tuple
+from typing import Any, Dict
 
 import numpy as np
 import pandas as pd
-import plotly as py
 import plotly.express as px
-import matplotlib.pyplot as plt
-import plotly.graph_objects as go
-import webbrowser
 
 import common
-from sklearn.cluster import KMeans
-from sklearn.compose import ColumnTransformer
-from sklearn.feature_extraction.text import TfidfVectorizer
-from sklearn.pipeline import Pipeline
-from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.decomposition import TruncatedSVD
-from sklearn.manifold import TSNE
-
-import spacy
-from scipy import stats
 
 from utils.tool import Tools
-from utils.plots import Plots
+from utils.viz_core import Plots
+from utils.viz_summaries import Viz_summaries
+from utils.preprocessing import Preprocessing
+from utils.clustering_utils import Clustering_utils
+from utils.summaries import Summaries
+from utils.keyword_analysis import Keyword_analysis
 
 
 # ---------------------------------------------------------------------------
@@ -48,194 +35,72 @@ SCALE = 3
 font_family = common.get_configs("font_family")
 font_size = common.get_configs("font_size")
 
-logger = logging.getLogger(__name__)
-
-_NLP_CACHE: Optional["spacy.language.Language"] = None  # type: ignore[valid-type]
+logs(show_level=common.get_configs("logger_level"), show_color=True)
+logger = CustomLogger(__name__)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"plotly\.io\._kaleido")
 
 tool_class = Tools()
 plot_class = Plots()
-
-
-# ============================================================================
-# Language normalization
-# ============================================================================
-
-def normalize_language_code(lang: Any) -> str:
-    """Map short codes (en, jp, tl, ...) to human-readable language names."""
-    if not isinstance(lang, str):
-        code = "unknown"
-    else:
-        code = lang.strip().lower() or "unknown"
-
-    label = tool_class.get_language_name(code)
-    if label is not None:
-        return label
-
-    # Fallback: title-case whatever is left
-    return code.title()
-
-
-# ============================================================================
-# Shared: load JSON
-# ============================================================================
-
-def load_asmr_data(json_path: str) -> Dict[str, Any]:
-    """Load ASMR results from a JSON file."""
-    with open(json_path, "r", encoding="utf-8") as f:
-        data = json.load(f)
-    logger.info(f"Loaded JSON with {len(data)} video entries from {json_path}")
-    return data
-
-
-# ============================================================================
-# PART 1 — WORDCLOUD PIPELINE
-# ============================================================================
-
-def build_corpus(data: Dict[str, Any], source: str) -> str:
-    """Build a text corpus from titles, descriptions, or both."""
-    texts = []
-
-    for _, info in data.items():
-        raw_title = info.get("title")
-        raw_description = info.get("description")
-
-        title = raw_title if isinstance(raw_title, str) else ""
-        description = raw_description if isinstance(raw_description, str) else ""
-
-        if source == "title":
-            texts.append(title)
-        elif source == "description":
-            texts.append(description)
-        elif source == "both":
-            texts.append(f"{title} {description}")
-        else:
-            raise ValueError(f"Unsupported corpus source: {source!r}")
-
-    raw_text = " ".join(texts)
-    logger.info(
-        f"Built text corpus from {len(texts)} videos using source='{source}', "
-        f"total characters={len(raw_text)}"
-    )
-    return raw_text
-
-
-def create_plotly_figure(img, title: str = "") -> Any:
-    """Create a Plotly figure to display the word cloud image."""
-    fig = px.imshow(img)
-    fig.update_xaxes(showticklabels=False)
-    fig.update_yaxes(showticklabels=False)
-    fig.update_layout(
-        title=title,
-        margin=dict(l=0, r=0, t=0, b=0),
-    )
-    return fig
-
-
-def save_plotly_figure(fig: Any, filename: str, width: int = 1600, height: int = 900, scale: int = SCALE,
-                       save_final: bool = True, save_png: bool = True, save_eps: bool = True) -> None:
-    """Save a Plotly figure as HTML, PNG, and EPS formats."""
-    output_final = os.path.join(common.root_dir, "figures")
-    os.makedirs(common.output_dir, exist_ok=True)
-    os.makedirs(output_final, exist_ok=True)
-
-    fig.update_layout(
-        template=common.get_configs("plotly_template"),
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        font=dict(
-            family=font_family,
-            size=font_size,
-        ),
-    )
-
-    fig.update_xaxes(
-        tickfont=dict(
-            family=font_family,
-            size=font_size,
-        ),
-        title_font=dict(
-            family=font_family,
-            size=font_size,
-        ),
-    )
-    fig.update_yaxes(
-        tickfont=dict(
-            family=font_family,
-            size=font_size,
-        ),
-        title_font=dict(
-            family=font_family,
-            size=font_size,
-        ),
-    )
-
-    html_path = os.path.join(common.output_dir, filename + ".html")
-    py.offline.plot(
-        fig,
-        filename=html_path,
-        auto_open=True,
-    )
-
-    if save_final:
-        final_html_path = os.path.join(output_final, filename + ".html")
-        py.offline.plot(
-            fig,
-            filename=final_html_path,
-            auto_open=False,
-        )
-
-    try:
-        if save_png:
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore",
-                    message=".*Support for Kaleido versions less than 1.0.0.*",
-                    category=DeprecationWarning,
-                )
-                png_path = os.path.join(common.output_dir, filename + ".png")
-                fig.write_image(
-                    png_path,
-                    width=width,
-                    height=height,
-                    scale=scale,
-                )
-            if save_final:
-                final_png_path = os.path.join(output_final, filename + ".png")
-                shutil.copy(png_path, final_png_path)
-
-        if save_eps:
-            with warnings.catch_warnings():
-                warnings.simplefilter("ignore", DeprecationWarning)
-                eps_path = os.path.join(common.output_dir, filename + ".eps")
-                fig.write_image(
-                    eps_path,
-                    width=width,
-                    height=height,
-                )
-            if save_final:
-                final_eps_path = os.path.join(output_final, filename + ".eps")
-                shutil.copy(eps_path, final_eps_path)
-    except ValueError as exc:
-        logger.error(
-            f"Value error raised when attempted to save image {filename}: {exc}"
-        )
+pre_process_class = Preprocessing()
+clustering_class = Clustering_utils()
+summary_class = Summaries()
+viz_summary = Viz_summaries()
+key_class = Keyword_analysis()
 
 
 def run_wordcloud_pipeline(data: Dict[str, Any], text_source: str = "both") -> None:
-    """Run a word cloud for the chosen text source (title / description / both)."""
+    """Generate and save a word-cloud visualization for ASMR video text.
+
+    This function orchestrates the complete word-cloud pipeline, including:
+      - extracting raw text from titles, descriptions, or both;
+      - applying text cleaning routines (e.g., lowercasing, stopword removal,
+        punctuation/markup normalization);
+      - rendering a word cloud using the project's custom visualization stack;
+      - exporting interactive HTML, PNG, and EPS variants to the `figures/`
+        and `output/` directories.
+
+    Args:
+        data: Dictionary of raw ASMR video metadata loaded from the JSON
+            dataset. Each entry should include at least `title` and/or
+            `description` fields.
+        text_source: Determines which textual field(s) to use. Valid options:
+            `"title"`, `"description"`, or `"both"`. Defaults to `"both"`.
+
+    Notes:
+        The function relies on utilities from:
+          - `Preprocessing` for corpus construction;
+          - `Tools` for text cleaning and custom stopword lists;
+          - `Plots` for image generation and multi-format figure export.
+
+        Figures are saved using the naming pattern:
+            wordcloud_<text_source>.(html|png|eps)
+
+    Returns:
+        None. Outputs are written to disk and logged through the project's
+        custom logger.
+    """
+    # Load domain-specific stopwords (e.g., ASMR jargon, channel branding terms)
     stopwords = tool_class.get_custom_stopwords()
 
     logger.info(f"Generating word cloud for text_source='{text_source}'")
-    raw_text = build_corpus(data, source=text_source)
+
+    # Build a corpus from the desired text fields (title/description/both)
+    raw_text = pre_process_class.build_corpus(data, source=text_source)
+
+    # Apply configurable cleaning: lowercasing, stripping, punctuation filtering
     cleaned_text = tool_class.clean_text(raw_text)
 
+    # Generate the word-cloud raster image (Pillow-based internally)
     img = plot_class.generate_wordcloud_image(cleaned_text, stopwords)
-    fig = create_plotly_figure(img, title="")
+
+    # Wrap the raster image into an interactive Plotly container for export
+    fig = plot_class.create_plotly_figure(img, title="")
 
     filename = f"wordcloud_{text_source}"
-    save_plotly_figure(
+
+    # Save HTML, PNG, and EPS; open HTML automatically if config allows
+    plot_class.save_plotly_figure(
         fig=fig,
         filename=filename,
         width=1600,
@@ -245,213 +110,46 @@ def run_wordcloud_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         save_png=True,
         save_eps=True,
     )
+
     logger.info(f"Wordcloud pipeline completed for text_source='{text_source}'")
 
 
-# ============================================================================
-# spaCy helpers: model + lemma keyword counts
-# ============================================================================
-
-def get_spacy_nlp(model_name: str = "en_core_web_sm"):
-    """Lazy-load and cache a spaCy model."""
-    global _NLP_CACHE
-    if _NLP_CACHE is not None:
-        return _NLP_CACHE
-
-    try:
-        nlp = spacy.load(model_name, disable=["parser", "ner"])
-        nlp.max_length = max(nlp.max_length, 2_000_000)
-        logger.info(f"Loaded spaCy model '{model_name}' with max_length={nlp.max_length}")
-    except Exception as exc:
-        logger.warning(f"Could not load spaCy model '{model_name}': {exc}")
-        return None
-
-    _NLP_CACHE = nlp
-    return nlp
-
-
-def run_verb_lemma_wordcloud_pipeline(
-    data: Dict[str, Any],
-    text_source: str = "both",
-    model_name: str = "en_core_web_sm",
-    top_k: int = 200,
-) -> None:
-    """
-    Build a wordcloud of lemmatised words, restricted to verbs.
-
-    - Uses spaCy lemmas.
-    - Each lemma is counted at most once per video.
-    - Variants are collapsed via Tools.normalize_lemma_form.
-    - Result is cached in a PKL file for fast subsequent runs.
-    """
-    analysis_dir = os.path.join(common.output_dir, "analysis")
-    os.makedirs(analysis_dir, exist_ok=True)
-
-    verb_pickle = os.path.join(
-        analysis_dir,
-        f"spacy_keywords_verbs_{text_source}.pkl",
-    )
-
-    if os.path.isfile(verb_pickle):
-        logger.info(f"Loading verb spaCy keyword counts from {verb_pickle}")
-        keyword_df = pd.read_pickle(verb_pickle)
-    else:
-        logger.info(
-            "No verb spaCy keyword pickle found; computing verb-only keyword counts..."
-        )
-        extra_stopwords = tool_class.get_custom_stopwords()
-        keyword_df = compute_spacy_keyword_counts(
-            data=data,
-            target_lemmas=None,
-            text_source=text_source,
-            model_name=model_name,
-            top_k=top_k,
-            extra_stopwords=extra_stopwords,
-            allowed_pos={"VERB"},
-        )
-        logger.info(f"Saving verb spaCy keyword counts to pickle {verb_pickle}")
-        keyword_df.to_pickle(verb_pickle)
-
-    if keyword_df.empty:
-        logger.warning("No verb lemmas found; skipping verb wordcloud.")
-        return
-
-    frequencies = dict(zip(keyword_df["lemma"], keyword_df["count"]))
-
-    img = plot_class.generate_wordcloud_from_frequencies(
-        frequencies=frequencies,
-        stopwords=tool_class.get_custom_stopwords(),
-    )
-
-    fig = create_plotly_figure(
-        img,
-        title="",
-    )
-    save_plotly_figure(
-        fig,
-        filename=f"wordcloud_verbs_{text_source}",
-    )
-
-
-def compute_spacy_keyword_counts(
-    data: Dict[str, Any],
-    target_lemmas: Optional[Set[str]] = None,
-    text_source: str = "both",
-    model_name: str = "en_core_web_sm",
-    top_k: int = 30,
-    extra_stopwords: Optional[Set[str]] = None,
-    allowed_pos: Optional[Set[str]] = None,
-) -> pd.DataFrame:
-    """
-    Count lemmas across videos using spaCy.
-
-    - Each lemma is counted at most once per video.
-    - Lemmas are normalised via Tools.normalize_lemma_form so that
-      variants (e.g. "whispers", "whispering") collapse to one key.
-    - If allowed_pos is provided (e.g. {"VERB"}), only those parts of
-      speech are considered.
-    """
-    nlp = get_spacy_nlp(model_name)
-    if nlp is None:
-        return pd.DataFrame(columns=["lemma", "count"])
-
-    # Build per-video texts
-    texts: list[str] = []
-    for _, info in data.items():
-        title = info.get("title") or ""
-        description = info.get("description") or ""
-
-        if text_source == "title":
-            txt = title
-        elif text_source == "description":
-            txt = description
-        elif text_source == "both":
-            txt = f"{title}\n{description}"
-        else:
-            raise ValueError(f"Unsupported text_source: {text_source!r}")
-
-        texts.append(tool_class.clean_text(txt))
-
-    mode = "explicit" if target_lemmas else "auto-topk"
-    logger.info(
-        f"Running spaCy over {len(texts)} videos for lemma counts "
-        f"(text_source={text_source}, mode={mode}, allowed_pos={allowed_pos})"
-    )
-
-    # Normalise target lemma set once
-    if target_lemmas is not None:
-        target_lemmas = {
-            tool_class.normalize_lemma_form(w.lower())
-            for w in target_lemmas
-        }
-
-    # Lowercased extra stopwords
-    if extra_stopwords is None:
-        extra_stopwords_lc: Set[str] = set()
-    else:
-        extra_stopwords_lc = {w.lower() for w in extra_stopwords}
-
-    counts: Counter = Counter()
-
-    for doc in nlp.pipe(texts, batch_size=256):
-        lemma_set: Set[str] = set()
-
-        for token in doc:
-            if not token.is_alpha:
-                continue
-            if token.is_stop:
-                continue
-            if allowed_pos is not None and token.pos_ not in allowed_pos:
-                continue
-
-            raw_lemma = token.lemma_.lower()
-            lemma = tool_class.normalize_lemma_form(raw_lemma)
-
-            if lemma in extra_stopwords_lc:
-                continue
-
-            lemma_set.add(lemma)
-
-        if not lemma_set:
-            continue
-
-        if target_lemmas is not None:
-            for lemma in lemma_set.intersection(target_lemmas):
-                counts[lemma] += 1
-        else:
-            for lemma in lemma_set:
-                counts[lemma] += 1
-
-    if not counts:
-        logger.warning("No lemmas counted; returning empty keyword table.")
-        return pd.DataFrame(columns=["lemma", "count"])
-
-    df = pd.DataFrame(
-        {"lemma": list(counts.keys()), "count": list(counts.values())}
-    ).sort_values("count", ascending=False)
-
-    if top_k is not None:
-        df = df.head(top_k)
-
-    logger.info(
-        "Top spaCy keyword lemmas (first 10 rows):\n"
-        f"{df.head(10).to_string(index=False)}"
-    )
-    logger.info(
-        f"Total unique lemmas in table: {len(df)}, "
-        f"min count={df['count'].min()}, "
-        f"median count={df['count'].median():.1f}, "
-        f"max count={df['count'].max()}"
-    )
-
-    return df
-
-
 def plot_spacy_keyword_bar(keyword_df: pd.DataFrame, filename: str = "spacy_keyword_bar") -> None:
+    """Plot and save a bar chart of spaCy-derived keyword lemma frequencies.
+
+    This function visualizes how often lemmatised content words (computed
+    upstream via spaCy) appear across the ASMR video corpus. Each bar
+    corresponds to a single lemma and its height reflects the number of
+    distinct videos in which that lemma occurs at least once.
+
+    The resulting figure is exported via the project's Plotly wrapper
+    (`plot_class.save_plotly_figure`) as:
+        - HTML (interactive),
+        - PNG,
+        - EPS,
+    using the configured `SCALE`, font settings, and Plotly template.
+
+    Args:
+        keyword_df: DataFrame with at least two columns:
+            - `lemma`: string lemma label (e.g., "whisper", "sleep").
+            - `count`: integer count of videos containing that lemma.
+        filename: Base filename (without extension) to use when saving
+            the figure. Defaults to `"spacy_keyword_bar"`.
+
+    Returns:
+        None. The function writes figure files to disk and logs a summary
+        message indicating how many lemmas were plotted.
+
+    Notes:
+        If `keyword_df` is empty, the function logs a warning and exits
+        early to avoid generating an empty or misleading plot.
+    """
+    # Guard against missing or degenerate input to avoid empty plots.
     if keyword_df.empty:
         logger.warning("Keyword DataFrame is empty; no spaCy bar plot created.")
         return
 
+    # Construct a simple bar chart: lemmas on the x-axis, counts on the y-axis.
     fig = px.bar(
         keyword_df,
         x="lemma",
@@ -459,725 +157,66 @@ def plot_spacy_keyword_bar(keyword_df: pd.DataFrame, filename: str = "spacy_keyw
         labels={"lemma": "Lemma", "count": "Number of videos containing lemma"},
         text="count"
     )
-    # Put the text on top of each bar
+
+    # Place numeric counts above each bar for direct readability in exports.
     fig.update_traces(
         texttemplate="%{text}",
         textposition="outside",
     )
 
+    # Rotate x-axis labels for better readability when there are many lemmas.
     fig.update_xaxes(tickangle=45)
+
+    # Ensure the y-axis starts at zero so bar heights are interpretable.
     fig.update_yaxes(rangemode="tozero")
 
-    save_plotly_figure(fig, filename=filename, width=1600, height=900, scale=SCALE)
-    logger.info(
-        f"Saved spaCy keyword bar plot with {len(keyword_df)} lemmas as {filename}"
-    )
-
-
-# ============================================================================
-# PART 2 — ANALYTICS & CLUSTERING
-# ============================================================================
-
-def _parse_upload_datetime(upload_date_str: Optional[str]) -> Optional[datetime]:
-    """Parse ISO 8601 uploadDate string into a timezone-aware datetime."""
-    if not isinstance(upload_date_str, str) or not upload_date_str:
-        return None
-    try:
-        if upload_date_str.endswith("Z"):
-            return datetime.fromisoformat(upload_date_str.replace("Z", "+00:00"))
-        return datetime.fromisoformat(upload_date_str)
-    except Exception as exc:
-        logger.warning(f"Could not parse uploadDate '{upload_date_str}': {exc}")
-        return None
-
-
-def get_text_series(df: pd.DataFrame, text_source: str = "both") -> pd.Series:
-    """Return text Series according to requested source."""
-    text_source = text_source.lower()
-    titles = df["title"].fillna("")
-    descriptions = df["description"].fillna("")
-
-    if text_source == "title":
-        return titles
-    if text_source == "description":
-        return descriptions
-    if text_source == "both":
-        return titles + " " + descriptions  # type: ignore
-    raise ValueError(f"Unsupported text_source: {text_source!r}")
-
-
-def add_title_style_features(df: pd.DataFrame) -> pd.DataFrame:
-    """Add features capturing 'title style'."""
-    titles = df["title"].fillna("")
-
-    df["title_word_count"] = titles.str.split().str.len()
-    df["title_char_count"] = titles.str.len()
-    df["title_has_brackets"] = titles.str.contains(r"[\[\]\(\)]", regex=True)
-    df["title_has_all_caps_word"] = titles.str.contains(r"\b[A-Z]{3,}\b")
-    df["title_has_exclamation"] = titles.str.contains("!")
-    df["title_has_question"] = titles.str.contains(r"\?")
-    df["title_has_hashtag"] = titles.str.contains("#")
-    df["title_has_no_talking_tag"] = titles.str.contains(
-        r"no[-\s]?talk(?:ing)?", case=False, regex=True
-    )
-    return df
-
-
-def add_theme_flags(df: pd.DataFrame, model_name: str = "en_core_web_sm", text_source: str = "both") -> pd.DataFrame:
-    """
-    Add boolean columns for content themes using spaCy.
-    """
-    nlp = get_spacy_nlp(model_name)
-    theme_cols = [
-        "has_whisper",
-        "has_no_talking",
-        "has_sleep",
-        "has_binaural",
-        "has_roleplay",
-        "has_ear_cleaning",
-        "has_mukbang",
-        "has_keyboard",
-        "has_visual",
-        "has_drive",
-    ]
-
-    for col in theme_cols:
-        if col not in df.columns:
-            df[col] = False
-
-    if nlp is None:
-        logger.warning("spaCy not available; theme flags remain False.")
-        return df
-
-    texts = get_text_series(df, text_source=text_source).tolist()
-
-    logger.info(
-        f"Running spaCy theme detection on {len(df)} videos (text_source={text_source})"
-    )
-
-    WHISPER_LEMMAS = {"whisper"}
-    SLEEP_LEMMAS = {"sleep", "insomnia"}
-    ROLEPLAY_LEMMAS = {"roleplay", "exam", "checkup", "check-up", "haircut", "barber"}
-    EAR_LEMMAS = {"ear", "otoscope"}
-    MUKBANG_LEMMAS = {"mukbang"}
-    KEYBOARD_LEMMAS = {"keyboard", "type"}
-    VISUAL_LEMMAS = {"visual", "movement", "trigger"}
-    DRIVE_LEMMAS = {"drive"}  # lemma-based driving theme
-
-    for idx, doc in zip(df.index, nlp.pipe(texts, batch_size=256)):
-        lower_text = doc.text.lower()
-
-        has_whisper = any(tok.lemma_.lower() in WHISPER_LEMMAS for tok in doc)
-
-        has_no_talking = False
-        if (
-            "no talking" in lower_text
-            or "no-talk" in lower_text
-            or "no talk" in lower_text
-            or "without talking" in lower_text
-        ):
-            has_no_talking = True
-        else:
-            for i, tok in enumerate(doc):
-                if tok.lemma_.lower() in {"talk", "speak"} and i > 0:
-                    prev = doc[i - 1]
-                    if prev.lemma_.lower() in {"no", "without"}:
-                        has_no_talking = True
-                        break
-
-        has_sleep = any(tok.lemma_.lower() in SLEEP_LEMMAS for tok in doc) or "for sleep" in lower_text
-
-        has_binaural = any(
-            kw in lower_text
-            for kw in ["binaural", "3dio", "3d audio", "3d sound", "8d audio", "8d sound"]
-        )
-
-        has_roleplay = False
-        if "roleplay" in lower_text or "rp " in lower_text or " rp" in lower_text:
-            has_roleplay = True
-        else:
-            for tok in doc:
-                if tok.lemma_.lower() in ROLEPLAY_LEMMAS:
-                    has_roleplay = True
-                    break
-
-        has_ear_cleaning = False
-        if (
-            "ear cleaning" in lower_text
-            or "ear massage" in lower_text
-            or "ear exam" in lower_text
-            or "ear attention" in lower_text
-            or "ear brushing" in lower_text
-        ):
-            has_ear_cleaning = True
-        else:
-            for i, tok in enumerate(doc):
-                if tok.lemma_.lower() in EAR_LEMMAS:
-                    window = doc[max(0, i - 3): i + 4]
-                    for w in window:
-                        if w.lemma_.lower() in {"clean", "brush", "massage", "attention"}:
-                            has_ear_cleaning = True
-                            break
-                if has_ear_cleaning:
-                    break
-
-        has_mukbang = (
-            "mukbang" in lower_text
-            or "eating asmr" in lower_text
-            or "eating sounds" in lower_text
-            or "eating show" in lower_text
-        )
-        if not has_mukbang:
-            for tok in doc:
-                if tok.lemma_.lower() in MUKBANG_LEMMAS:
-                    has_mukbang = True
-                    break
-
-        has_keyboard = "keyboard" in lower_text
-        if not has_keyboard:
-            for tok in doc:
-                if tok.lemma_.lower() in KEYBOARD_LEMMAS:
-                    has_keyboard = True
-                    break
-
-        has_visual = any(
-            phrase in lower_text
-            for phrase in [
-                "visual triggers",
-                "hand movements",
-                "visuals",
-                "slow movements",
-                "trigger assortment",
-            ]
-        )
-        if not has_visual:
-            for tok in doc:
-                if tok.lemma_.lower() in VISUAL_LEMMAS:
-                    has_visual = True
-                    break
-
-        # --- has_drive ---
-        has_drive = False
-
-        # lemma-based detection
-        if any(tok.lemma_.lower() in DRIVE_LEMMAS for tok in doc):
-            has_drive = True
-
-        # optional extra phrase-based heuristics
-        if not has_drive and any(
-            phrase in lower_text
-            for phrase in [
-                "driving",
-                "drive with me",
-                "car",
-                "road trip",
-            ]
-        ):
-            has_drive = True
-
-        df.at[idx, "has_whisper"] = has_whisper
-        df.at[idx, "has_no_talking"] = has_no_talking
-        df.at[idx, "has_sleep"] = has_sleep
-        df.at[idx, "has_binaural"] = has_binaural
-        df.at[idx, "has_roleplay"] = has_roleplay
-        df.at[idx, "has_ear_cleaning"] = has_ear_cleaning
-        df.at[idx, "has_mukbang"] = has_mukbang
-        df.at[idx, "has_keyboard"] = has_keyboard
-        df.at[idx, "has_visual"] = has_visual
-        df.at[idx, "has_drive"] = has_drive
-
-    theme_counts = {col: int(df[col].sum()) for col in theme_cols}
-    logger.info(f"Theme flag counts (number of videos with flag=True): {theme_counts}")
-
-    return df
-
-
-def add_growth_category(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Add 'growth_category' based on fixed views_per_day thresholds
-    (no quantiles):
-
-        views_per_day < 100        -> 'slow'
-        100 <= views_per_day < 5000 -> 'medium'
-        views_per_day >= 5000      -> 'fast'
-        missing / <= 0             -> 'unknown'
-    """
-    vpd = pd.to_numeric(df["views_per_day"], errors="coerce")
-
-    def _cat(x: float) -> str:
-        if pd.isna(x) or x <= 0:
-            return "unknown"
-        if x < 100:
-            return "slow"
-        if x < 5000:
-            return "medium"
-        return "fast"
-
-    df["growth_category"] = vpd.apply(_cat)
-    counts = df["growth_category"].value_counts()
-    logger.info(
-        "Growth category distribution based on fixed views_per_day thresholds:\n"
-        f"{counts.to_string()}"
-    )
-    return df
-
-
-def json_to_dataframe(data: Dict[str, Any], reference_date: Optional[datetime] = None,
-                      text_source: str = "both") -> pd.DataFrame:
-    """Convert the raw JSON dict into a pandas DataFrame with derived fields."""
-    if reference_date is None:
-        reference_date = datetime.now(timezone.utc)
-
-    rows = []
-    for video_id, info in data.items():
-        title = info.get("title") or ""
-        description = info.get("description") or ""
-        duration = info.get("duration")
-        channel_id = info.get("channelId")
-        author = info.get("author")
-        views = info.get("views")
-        likes = info.get("likes")
-        raw_language = info.get("language")
-        language = normalize_language_code(raw_language)
-        upload_date_str = info.get("uploadDate")
-        channel_avg_views = info.get("channel_average_views")
-
-        upload_dt = _parse_upload_datetime(upload_date_str)
-        if upload_dt is not None:
-            days_since_upload = (reference_date - upload_dt).total_seconds() / 86400.0
-            days_since_upload = max(days_since_upload, 1e-6)
-        else:
-            days_since_upload = np.nan
-
-        rows.append(
-            {
-                "video_id": video_id,
-                "title": title,
-                "description": description,
-                "language": language,
-                "views": views,
-                "likes": likes,
-                "duration_seconds": duration,
-                "channel_id": channel_id,
-                "author": author,
-                "upload_datetime": upload_dt,
-                "days_since_upload": days_since_upload,
-                "channel_average_views": channel_avg_views,
-            }
-        )
-
-    df = pd.DataFrame(rows)
-    logger.info(f"Constructed initial DataFrame with shape {df.shape}")
-
-    df["upload_datetime"] = pd.to_datetime(
-        df["upload_datetime"], errors="coerce", utc=True
-    )
-
-    df["views"] = pd.to_numeric(df["views"], errors="coerce")
-    df["likes"] = pd.to_numeric(df["likes"], errors="coerce")
-    df["duration_seconds"] = pd.to_numeric(df["duration_seconds"], errors="coerce")
-    df["channel_average_views"] = pd.to_numeric(
-        df["channel_average_views"], errors="coerce"
-    )
-
-    df["duration_minutes"] = df["duration_seconds"] / 60.0
-    df["duration_bucket"] = df["duration_minutes"].apply(tool_class._duration_bucket)
-
-    df["engagement_rate"] = np.where(
-        df["views"] > 0,
-        df["likes"] / df["views"],
-        np.nan,
-    )
-    df["views_per_day"] = np.where(
-        df["days_since_upload"] > 0,
-        df["views"] / df["days_since_upload"],
-        np.nan,
-    )
-    df["likes_per_day"] = np.where(
-        df["days_since_upload"] > 0,
-        df["likes"] / df["days_since_upload"],
-        np.nan,
-    )
-    df["rel_views_vs_channel_avg"] = np.where(
-        (df["channel_average_views"] > 0)
-        & df["channel_average_views"].notna(),
-        df["views"] / df["channel_average_views"],
-        np.nan,
-    )
-
-    # ---- NEW: log10-transformed metrics for use in tables ----
-    df["log10_views"] = np.where(df["views"] > 0, np.log10(df["views"]), np.nan)
-    df["log10_views_per_day"] = np.where(
-        df["views_per_day"] > 0, np.log10(df["views_per_day"]), np.nan
-    )
-    df["log10_likes"] = np.where(df["likes"] > 0, np.log10(df["likes"]), np.nan)
-    df["log10_likes_per_day"] = np.where(
-        df["likes_per_day"] > 0, np.log10(df["likes_per_day"]), np.nan
-    )
-    df["log10_engagement_rate"] = np.where(
-        df["engagement_rate"] > 0, np.log10(df["engagement_rate"]), np.nan
-    )
-
-    df["upload_year"] = df["upload_datetime"].dt.year  # type: ignore
-    df["upload_month"] = df["upload_datetime"].dt.month  # type: ignore
-    df["upload_day"] = df["upload_datetime"].dt.day  # type: ignore
-    df["upload_date"] = df["upload_datetime"].dt.date  # type: ignore
-    df["upload_season"] = df["upload_month"].apply(tool_class._month_to_season)
-
-    df = add_title_style_features(df)
-    df = add_theme_flags(df, text_source=text_source)
-    df = add_growth_category(df)
-
-    logger.info(
-        "Finished enriching DataFrame with derived columns; "
-        f"final shape is {df.shape}"
-    )
-    return df
-
-
-def plot_tsne_research(df: pd.DataFrame, name_suffix: str = "tsne_research", label_clusters: bool = True,
-                       ellipse_scale: float = 1.2):
-    """
-    Produce a research-style t-SNE plot with:
-    - stable color map
-    - ellipse-like outlines around clusters (via Plotly path shapes)
-    - labeled cluster centroids
-    - extensive logger output to interpret clusters
-    """
-
-    # Require necessary columns
-    if {"cluster", "embedding_x", "embedding_y"} - set(df.columns):
-        logger.warning("t-SNE research plot: missing embedding_x/y or cluster.")
-        return
-
-    df = df.dropna(subset=["embedding_x", "embedding_y"]).copy()
-    if df.empty:
-        logger.warning("t-SNE research plot: no non-null embeddings.")
-        return
-
-    df["cluster"] = df["cluster"].astype(int)
-    df["cluster_str"] = df["cluster"].astype(str)
-
-    # ------------------------------------------------------------------
-    # LOGGING
-    # ------------------------------------------------------------------
-    logger.info("===== t-SNE RESEARCH PLOT SUMMARY =====")
-    logger.info(f"Total points in t-SNE: {len(df)}")
-
-    logger.info(
-        "Cluster sizes:\n"
-        + df["cluster"].value_counts().sort_index().to_string()
-    )
-
-    if "language" in df.columns:
-        logger.info("Top languages per cluster:")
-        for cid, grp in df.groupby("cluster"):
-            lang = grp["language"].value_counts().head(5)
-            logger.info(f"  cluster {cid}:\n{lang.to_string()}")
-
-    theme_cols = [c for c in df.columns if c.startswith("has_")]
-    for theme_col in theme_cols:
-        mean_vals = df.groupby("cluster")[theme_col].mean().round(3)
-        logger.info(f"{theme_col} prevalence per cluster:\n{mean_vals.to_string()}")
-
-    logger.info("================================================")
-
-    # ------------------------------------------------------------------
-    # COLOR MAP (stable by cluster id)
-    # ------------------------------------------------------------------
-    palette = px.colors.qualitative.Plotly
-    unique_clusters = sorted(df["cluster"].unique())
-    color_map = {
-        str(c): palette[i % len(palette)]
-        for i, c in enumerate(unique_clusters)
-    }
-
-    # ------------------------------------------------------------------
-    # SCATTER LAYER
-    # ------------------------------------------------------------------
-    fig = go.Figure()
-
-    for cid, grp in df.groupby("cluster"):
-        fig.add_trace(
-            go.Scatter(
-                x=grp["embedding_x"],
-                y=grp["embedding_y"],
-                mode="markers",
-                marker=dict(
-                    size=7,  # bigger dots
-                    color=color_map[str(cid)],
-                    opacity=0.3,
-                    # thin outline to make markers pop a bit more
-                    line=dict(width=0.5, color="rgba(0,0,0,0.4)"),
-                ),
-                name=f"Cluster {cid}",
-                text=grp.get("title", "").fillna(""),  # type: ignore
-                hovertemplate="<b>%{text}</b><br>x=%{x:.2f}, y=%{y:.2f}<extra></extra>",
-            )
-        )
-
-    # ------------------------------------------------------------------
-    # CLUSTER OUTLINES (ellipse-like using Plotly path shapes)
-    # ------------------------------------------------------------------
-    shapes = []
-    for cid, grp in df.groupby("cluster"):
-        if len(grp) < 3:
-            continue
-
-        x = grp["embedding_x"].values
-        y = grp["embedding_y"].values
-
-        cx, cy = x.mean(), y.mean()  # type: ignore
-        cov = np.cov(x, y)  # type: ignore
-
-        # Eigendecomposition for principal axes
-        eigvals, eigvecs = np.linalg.eigh(cov)
-        order = eigvals.argsort()[::-1]
-        eigvals = eigvals[order]
-        eigvecs = eigvecs[:, order]
-
-        # 1-sigma ellipse radii
-        width, height = 2 * ellipse_scale * np.sqrt(eigvals)
-        angle = np.arctan2(eigvecs[1, 0], eigvecs[0, 0])
-
-        # Parameterize ellipse and build path string
-        theta = np.linspace(0, 2 * np.pi, 200)
-        ex = (width / 2.0) * np.cos(theta)
-        ey = (height / 2.0) * np.sin(theta)
-
-        # Rotate and translate
-        xr = cx + ex * np.cos(angle) - ey * np.sin(angle)
-        yr = cy + ex * np.sin(angle) + ey * np.cos(angle)
-
-        # Build SVG-like path for Plotly
-        path_cmds = [f"M {xr[0]},{yr[0]}"] + [
-            f"L {xr[i]},{yr[i]}" for i in range(1, len(xr))
-        ]
-        path_cmds.append("Z")
-        path = " ".join(path_cmds)
-
-        shapes.append(
-            dict(
-                type="path",
-                path=path,
-                line=dict(
-                    color="black",
-                    width=4,        # thicker line
-                    dash="dot",
-                ),
-                fillcolor="rgba(0,0,0,0)",
-                opacity=1,      # more visible
-            )
-        )
-
-        # Optional centroid label (A, B, C...; fall back to cluster id if > 26)
-        if label_clusters:
-            if 0 <= cid < 26:  # type: ignore
-                label = chr(65 + cid)  # type: ignore
-            else:
-                label = f"C{cid}"
-
-            # make it bold and bigger
-            label_html = f"<b>{label}</b>"
-
-            fig.add_trace(
-                go.Scatter(
-                    x=[cx],
-                    y=[cy],
-                    mode="text",
-                    text=[label_html],
-                    textfont=dict(size=30, color="black"),
-                    showlegend=False,
-                )
-            )
-
-    fig.update_layout(shapes=shapes)
-
-    fig.update_layout(
-        width=1200,
-        height=900,
-        title="",
-        plot_bgcolor="white",
-        paper_bgcolor="white",
-        xaxis_title="",
-        yaxis_title="",
-        showlegend=False
-    )
-
-    save_plotly_figure(
-        fig,
-        f"cluster_tsne_research_{name_suffix}",
-        width=1600,
-        height=900,
-        scale=3,
-    )
-
-
-def summarize_by_duration_bucket(df: pd.DataFrame) -> pd.DataFrame:
-    """
-    Duration-bucket level stats: mean(SD) for views, likes,
-    views/day, likes/day, engagement rate + same in log10.
-    """
-    df_copy = df.copy()
-
-    bucket_order = [
-        "under_10min",
-        "10_to_30min",
-        "30_to_60min",
-        "60_to_180min",
-        "over_180min",
-        "unknown",
-    ]
-
-    df_copy["duration_bucket"] = pd.Categorical(
-        df_copy["duration_bucket"],
-        categories=bucket_order,
-        ordered=True,
-    )
-
-    agg = (
-        df_copy.groupby("duration_bucket")
-        .agg(
-            video_count=("video_id", "count"),
-
-            mean_duration_minutes=("duration_minutes", "mean"),
-            sd_duration_minutes=("duration_minutes", "std"),
-
-            mean_views=("views", "mean"),
-            sd_views=("views", "std"),
-            median_views=("views", "median"),
-
-            mean_views_per_day=("views_per_day", "mean"),
-            sd_views_per_day=("views_per_day", "std"),
-
-            mean_likes=("likes", "mean"),
-            sd_likes=("likes", "std"),
-
-            mean_likes_per_day=("likes_per_day", "mean"),
-            sd_likes_per_day=("likes_per_day", "std"),
-
-            mean_engagement_rate=("engagement_rate", "mean"),
-            sd_engagement_rate=("engagement_rate", "std"),
-
-            mean_log10_views=("log10_views", "mean"),
-            sd_log10_views=("log10_views", "std"),
-
-            mean_log10_views_per_day=("log10_views_per_day", "mean"),
-            sd_log10_views_per_day=("log10_views_per_day", "std"),
-
-            mean_log10_likes=("log10_likes", "mean"),
-            sd_log10_likes=("log10_likes", "std"),
-
-            mean_log10_likes_per_day=("log10_likes_per_day", "mean"),
-            sd_log10_likes_per_day=("log10_likes_per_day", "std"),
-
-            mean_log10_engagement_rate=("log10_engagement_rate", "mean"),
-            sd_log10_engagement_rate=("log10_engagement_rate", "std"),
-        )
-        .reset_index()
-    )
-
-    logger.info(
-        "Duration bucket summary table (raw + log10):\n"
-        f"{agg.to_string(index=False)}"
-    )
-    return agg
-
-
-def summarize_by_language(df: pd.DataFrame) -> pd.DataFrame:
-    """Language-level engagement / growth."""
-    agg = (
-        df.groupby("language")
-        .agg(
-            video_count=("video_id", "count"),
-            mean_views=("views", "mean"),
-            sd_views=("views", "std"),
-            median_views=("views", "median"),
-            mean_views_per_day=("views_per_day", "mean"),
-            sd_views_per_day=("views_per_day", "std"),
-            mean_likes=("likes", "mean"),
-            sd_likes=("likes", "std"),
-            mean_likes_per_day=("likes_per_day", "mean"),
-            sd_likes_per_day=("likes_per_day", "std"),
-            mean_engagement_rate=("engagement_rate", "mean"),
-        )
-        .reset_index()
-    )
-    logger.info(
-        "Language-level summary (all languages):\n"
-        f"{agg.sort_values('video_count', ascending=False).to_string(index=False)}"
-    )
-    top_langs = (
-        agg.sort_values("video_count", ascending=False)
-        .head(10)[["language", "video_count"]]
-    )
-    logger.info(
-        "Top languages by video count (first 10):\n"
-        f"{top_langs.to_string(index=False)}"
-    )
-    return agg
-
-
-def summarize_title_styles(df: pd.DataFrame) -> pd.DataFrame:
-    """Compare engagement across 'title style' bins."""
-    df_copy = df.copy()
-    df_copy["title_length_bucket"] = pd.cut(
-        df_copy["title_word_count"],
-        bins=[0, 5, 10, 20, 1000],
-        labels=["<=5 words", "6–10 words", "11–20 words", ">20 words"],
-        include_lowest=True,
-    )
-
-    agg = (
-        df_copy.groupby("title_length_bucket")
-        .agg(
-            video_count=("video_id", "count"),
-            mean_views=("views", "mean"),
-            sd_views=("views", "std"),
-            mean_views_per_day=("views_per_day", "mean"),
-            sd_views_per_day=("views_per_day", "std"),
-            mean_likes=("likes", "mean"),
-            sd_likes=("likes", "std"),
-            mean_likes_per_day=("likes_per_day", "mean"),
-            sd_likes_per_day=("likes_per_day", "std"),
-            mean_engagement_rate=("engagement_rate", "mean"),
-        )
-        .reset_index()
-    )
-
-    logger.info(
-        "Title length bucket summary:\n"
-        f"{agg.to_string(index=False)}"
-    )
-    return agg
-
-
-def summarize_theme_vs_growth(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
-    """Compare views_per_day for videos with vs without a given theme flag."""
-    if theme_col not in df.columns:
-        raise ValueError(f"Unknown theme column: {theme_col}")
-
-    agg = (
-        df.groupby(theme_col)["views_per_day"]
-        .describe(percentiles=[0.25, 0.5, 0.75])
-        .reset_index()
-    )
-    logger.info(
-        f"views_per_day summary by {theme_col} flag:\n"
-        f"{agg.to_string(index=False)}"
-    )
-    return agg
+    # Delegate all saving (HTML/PNG/EPS) to the shared Plotly helper.
+    plot_class.save_plotly_figure(fig, filename=filename, width=1600, height=900, scale=SCALE)
+
+    # Log how many lemmas were included and under which base filename.
+    logger.info(f"Saved spaCy keyword bar plot with {len(keyword_df)} lemmas as {filename}")
 
 
 def summarize_by_theme_category(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
+    """Compute descriptive statistics for videos split by a boolean theme flag.
+
+    This function summarises multiple popularity and engagement indicators
+    for two groups of videos: those where the thematic flag (e.g.,
+    `"has_whisper"`, `"has_sleep"`, `"has_binaural"`) is `True` and those
+    where it is `False`. For each group, it reports the mean and standard
+    deviation of raw metrics and their log10-transformed counterparts:
+
+        - views and views/day
+        - likes and likes/day
+        - engagement_rate
+        - log10-transformed versions of all above metrics
+
+    These summaries provide a structured way to quantify whether videos
+    containing a given theme differ systematically from videos without it.
+
+    Args:
+        df: A DataFrame containing ASMR video metadata and derived metrics,
+            including columns such as `views`, `likes`, `views_per_day`,
+            `likes_per_day`, `engagement_rate`, and their log10 transforms.
+        theme_col: The name of the boolean column marking presence (`True`)
+            or absence (`False`) of a theme. Must already exist in `df`.
+
+    Returns:
+        A DataFrame with one row per group (`False`, `True`) and aggregated
+        statistics for all listed metrics (mean and standard deviation).
+
+    Raises:
+        ValueError: If `theme_col` is not found in the provided DataFrame.
+
+    Notes:
+        The function logs a formatted table of results for traceability.
     """
-    Per theme flag (False / True):
-    mean(SD) for views, likes, views/day, likes/day, engagement_rate
-    and their log10-transformed versions.
-    """
+    # Validate that the requested thematic column exists in the dataset.
     if theme_col not in df.columns:
         raise ValueError(f"Unknown theme column: {theme_col}")
 
+    # Aggregate mean and SD across raw and log-transformed metrics,
+    # grouped by whether the theme flag is present.
     agg = (
         df.groupby(theme_col)
         .agg(
@@ -1216,26 +255,93 @@ def summarize_by_theme_category(df: pd.DataFrame, theme_col: str) -> pd.DataFram
         .reset_index()
     )
 
+    # Log a readable textual summary for auditing and interpretation.
     logger.info(
         f"Thematic summary (raw + log10) for {theme_col} (False/True):\n"
         f"{agg.to_string(index=False)}"
     )
+
     return agg
 
 
 def summarize_theme_by_duration_bucket(df: pd.DataFrame, theme_col: str) -> pd.DataFrame:
+    """Summarise popularity and engagement metrics by theme flag and duration bucket.
+
+    This function computes descriptive statistics for ASMR videos jointly
+    stratified by a boolean theme indicator (e.g., ``"has_whisper"``,
+    ``"has_sleep"``, ``"has_binaural"``) and by predefined duration
+    buckets (e.g., under 10 minutes, 10–30 minutes, etc.).
+
+    For each (theme, duration_bucket) combination, it reports:
+
+    * ``video_count`` (number of videos in the cell)
+    * Mean and standard deviation of raw metrics:
+        * ``views``
+        * ``views_per_day``
+        * ``likes``
+        * ``likes_per_day``
+        * ``engagement_rate``
+    * Mean and standard deviation of log10-transformed metrics:
+        * ``log10_views``
+        * ``log10_views_per_day``
+        * ``log10_likes``
+        * ``log10_likes_per_day``
+        * ``log10_engagement_rate``
+
+    These summaries are useful to assess how the interaction between
+    thematic category and video duration relates to popularity and
+    engagement patterns.
+
+    Args:
+        df: A pandas DataFrame containing one row per video and at least
+            the following columns:
+
+            * ``video_id``
+            * ``views``, ``views_per_day``
+            * ``likes``, ``likes_per_day``
+            * ``engagement_rate``
+            * ``log10_views``, ``log10_views_per_day``
+            * ``log10_likes``, ``log10_likes_per_day``
+            * ``log10_engagement_rate``
+            * ``duration_bucket``: categorical duration bin for each video.
+            * ``theme_col``: a boolean theme flag column (see below).
+
+        theme_col: Name of the boolean column in ``df`` indicating whether
+            a given theme is present (``True``) or absent (``False``),
+            for example ``"has_whisper"`` or ``"has_sleep"``. This column
+            must already exist in ``df``.
+
+    Returns:
+        A pandas DataFrame with one row per (theme_col, duration_bucket)
+        combination. Each row contains the number of videos and the
+        mean/standard deviation for all raw and log10-transformed metrics.
+
+    Raises:
+        ValueError: If ``theme_col`` is not present in ``df`` or if the
+            ``duration_bucket`` column is missing.
+
+    Notes:
+        * The duration buckets are ordered explicitly as:
+
+          ``["under_10min", "10_to_30min", "30_to_60min",
+          "60_to_180min", "over_180min", "unknown"]``
+
+        * A formatted summary table is logged via the project logger
+          for reproducibility and quick inspection.
     """
-    For a given theme flag, summarise stats by (theme, duration_bucket):
-    mean(SD) for views, likes, views/day, likes/day, engagement_rate
-    and their log10 versions.
-    """
+    # Validate that the requested theme indicator exists in the DataFrame.
     if theme_col not in df.columns:
         raise ValueError(f"Unknown theme column: {theme_col}")
+
+    # Ensure that duration_bucket is available for the joint stratification.
     if "duration_bucket" not in df.columns:
         raise ValueError("Column 'duration_bucket' is missing from DataFrame.")
 
+    # Work on a copy to avoid mutating the original dataset.
     df_copy = df.copy()
 
+    # Define a consistent, ordered set of duration buckets so output
+    # tables and plots follow a predictable ordering.
     bucket_order = [
         "under_10min",
         "10_to_30min",
@@ -1244,12 +350,16 @@ def summarize_theme_by_duration_bucket(df: pd.DataFrame, theme_col: str) -> pd.D
         "over_180min",
         "unknown",
     ]
+
+    # Cast duration_bucket to a Categorical with the specified order.
     df_copy["duration_bucket"] = pd.Categorical(
         df_copy["duration_bucket"],
         categories=bucket_order,
         ordered=True,
     )
 
+    # Group by (theme_col, duration_bucket) and aggregate counts plus
+    # mean/SD for both raw and log10-transformed metrics.
     agg = (
         df_copy.groupby([theme_col, "duration_bucket"])
         .agg(
@@ -1288,416 +398,99 @@ def summarize_theme_by_duration_bucket(df: pd.DataFrame, theme_col: str) -> pd.D
         .reset_index()
     )
 
+    # Log a neatly formatted multi-line summary to aid interpretation
+    # and to make the analysis traceable from the logs alone.
     logger.info(
         f"{theme_col} × duration_bucket summary (raw + log10):\n"
         f"{agg.to_string(index=False)}"
     )
+
     return agg
-
-
-def compute_monthly_video_counts(df: pd.DataFrame) -> pd.DataFrame:
-    """Number of ASMR videos per year/month."""
-    tmp = df.dropna(subset=["upload_year", "upload_month"])
-
-    monthly = (
-        tmp.groupby(["upload_year", "upload_month"])
-        .size()
-        .rename("video_count")
-        .reset_index()
-    )
-
-    monthly["upload_year"] = monthly["upload_year"].astype(int)
-    monthly["upload_month"] = monthly["upload_month"].astype(int)
-
-    year_str = monthly["upload_year"].astype(str)
-    month_str = monthly["upload_month"].astype(str).str.zfill(2)
-
-    monthly["year_month"] = pd.to_datetime(
-        year_str + "-" + month_str + "-01",
-        errors="coerce",
-    )
-
-    if not monthly.empty:
-        start = monthly["year_month"].min()
-        end = monthly["year_month"].max()
-        total = int(monthly["video_count"].sum())
-        logger.info(
-            "Monthly video counts cover "
-            f"{len(monthly)} months from {start.date()} to {end.date()}, "
-            f"total videos across all months={total}"
-        )
-
-    return monthly
-
-
-def compute_language_growth(df: pd.DataFrame) -> pd.DataFrame:
-    """Growth of ASMR per language (videos per year)."""
-    growth = (
-        df.groupby(["upload_year", "language"])
-        .size()
-        .rename("video_count")
-        .reset_index()
-    )
-    if not growth.empty:
-        years = sorted(growth["upload_year"].dropna().unique())
-        logger.info(
-            "Language growth table: "
-            f"{len(growth)} rows, {growth['language'].nunique()} languages, "
-            f"years {int(years[0])}–{int(years[-1])}"
-        )
-    return growth
-
-
-def compute_theme_trend_over_time(df: pd.DataFrame, theme_col: str, by_language: bool = False) -> pd.DataFrame:
-    """
-    Number of videos with a given theme per year (optionally per language).
-    """
-    if theme_col not in df.columns:
-        raise ValueError(f"Unknown theme column: {theme_col}")
-
-    df_tmp = df.dropna(subset=["upload_year"]).copy()
-    df_tmp["upload_year"] = df_tmp["upload_year"].astype(int)
-
-    group_keys = ["upload_year"]
-    if by_language:
-        group_keys.append("language")
-
-    grouped = df_tmp.groupby(group_keys)[theme_col]
-
-    trend = (
-        grouped.agg(
-            theme_count=lambda s: int(s.sum()),
-            total_videos="count",
-        )
-        .reset_index()
-    )
-
-    if not trend.empty:
-        logger.info(
-            f"Trend for {theme_col} (by_language={by_language}): "
-            f"{len(trend)} rows, total themed videos="
-            f"{int(trend['theme_count'].sum())}"
-        )
-
-    return trend
-
-
-def compute_seasonal_sleep_pattern(df: pd.DataFrame) -> pd.DataFrame:
-    """Are 'sleep' videos more common in winter?"""
-    if "has_sleep" not in df.columns:
-        raise ValueError("Theme flag 'has_sleep' not present.")
-
-    agg = (
-        df.groupby("upload_season")["has_sleep"]
-        .mean()
-        .reset_index(name="sleep_share")
-    )
-    agg["sleep_share"] = agg["sleep_share"].astype(float)
-
-    logger.info(
-        "Seasonal sleep-share pattern:\n"
-        f"{agg.to_string(index=False)}"
-    )
-    return agg
-
-
-def compute_lemma_trend_over_time(
-    df: pd.DataFrame,
-    lemma_name: str,
-    lemma_targets: Set[str],
-    text_source: str = "both",
-    model_name: str = "en_core_web_sm",
-) -> pd.DataFrame:
-    """
-    Number of videos per year containing any of the given lemmas.
-
-    Lemmas are normalised via Tools.normalize_lemma_form so that
-    variants (e.g. "relaxation", "relaxing") all count as one.
-    """
-    nlp = get_spacy_nlp(model_name)
-    if nlp is None:
-        logger.warning("spaCy not available; lemma trend not computed.")
-        return pd.DataFrame(columns=["upload_year", "theme_count", "total_videos"])
-
-    df_tmp = df.dropna(subset=["upload_year"]).copy()
-    df_tmp["upload_year"] = df_tmp["upload_year"].astype(int)
-
-    texts = get_text_series(df_tmp, text_source=text_source).tolist()
-    years = df_tmp["upload_year"].tolist()
-
-    # Normalise target lemmas once
-    lemma_targets_norm = {
-        tool_class.normalize_lemma_form(le.lower())
-        for le in lemma_targets
-    }
-
-    records: list[tuple[int, bool]] = []
-
-    for year, doc in zip(years, nlp.pipe(texts, batch_size=256)):
-        lemma_set = {
-            tool_class.normalize_lemma_form(tok.lemma_.lower())
-            for tok in doc
-            if tok.is_alpha and not tok.is_stop
-        }
-        has_lemma = bool(lemma_set & lemma_targets_norm)
-        records.append((year, has_lemma))
-
-    if not records:
-        return pd.DataFrame(columns=["upload_year", "theme_count", "total_videos"])
-
-    tmp = pd.DataFrame(records, columns=["upload_year", "has_lemma"])
-
-    grouped = tmp.groupby("upload_year")["has_lemma"]
-    trend = (
-        grouped.agg(
-            theme_count=lambda s: int(s.sum()),
-            total_videos="count",
-        )
-        .reset_index()
-    )
-
-    if not trend.empty:
-        logger.info(
-            f"Lemma trend for '{lemma_name}': {len(trend)} years, "
-            f"total videos with lemma={int(trend['theme_count'].sum())}"
-        )
-        logger.info(
-            "Lemma trend table:\n"
-            f"{trend.to_string(index=False)}"
-        )
-
-    return trend
-
-
-def cluster_videos(df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
-                   text_source: str = "both") -> Tuple[pd.DataFrame, Optional[Pipeline], Optional[pd.DataFrame]]:
-    """Cluster videos using title/description text, duration, engagement, and language."""
-    df_copy = df.copy()
-    df_copy["text_all"] = get_text_series(df_copy, text_source=text_source)
-
-    feature_cols = [
-        "text_all",
-        "duration_minutes",
-        "engagement_rate",
-        "views_per_day",
-        "language",
-    ]
-
-    for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-        df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
-
-    preprocess = ColumnTransformer(
-        transformers=[
-            (
-                "text",
-                TfidfVectorizer(
-                    max_features=5000,
-                    ngram_range=(1, 2),
-                    min_df=5,
-                ),
-                "text_all",
-            ),
-            (
-                "numeric",
-                StandardScaler(with_mean=False),
-                ["duration_minutes", "engagement_rate", "views_per_day"],
-            ),
-            (
-                "lang",
-                OneHotEncoder(handle_unknown="ignore"),
-                ["language"],
-            ),
-        ],
-        remainder="drop",
-    )
-
-    pipeline = Pipeline(
-        steps=[
-            ("preprocess", preprocess),
-            (
-                "cluster",
-                KMeans(
-                    n_clusters=n_clusters,
-                    random_state=random_state,
-                    n_init=10,
-                ),
-            ),
-        ]
-    )
-
-    X = df_copy[feature_cols]
-    logger.info(
-        f"Fitting clustering model on {len(df_copy)} videos (text_source={text_source}, "
-        f"n_clusters={n_clusters})"
-    )
-    pipeline.fit(X)
-
-    logger.info("Assigning cluster labels...")
-    df_copy["cluster"] = pipeline.predict(X)
-
-    pca_info: Optional[pd.DataFrame] = None
-
-    try:
-        logger.info("Computing 2D PCA embedding for cluster visualization...")
-        features = pipeline.named_steps["preprocess"].transform(X)
-
-        reducer = PCA(n_components=2, random_state=random_state)
-        embedding_2d = reducer.fit_transform(features)
-
-        df_copy["embedding_x"] = embedding_2d[:, 0]
-        df_copy["embedding_y"] = embedding_2d[:, 1]
-
-        pca_info = pd.DataFrame(
-            {
-                "component": [1, 2],
-                "explained_variance_ratio": reducer.explained_variance_ratio_,
-            }
-        )
-        logger.info(
-            "PCA explained variance ratios for first 2 components: "
-            f"{list(reducer.explained_variance_ratio_)}"
-        )
-    except Exception as exc:
-        logger.warning(f"Could not compute 2D embedding for clusters: {exc}")
-        df_copy["embedding_x"] = np.nan
-        df_copy["embedding_y"] = np.nan
-
-    if "cluster" in df_copy.columns:
-        cluster_counts = df_copy["cluster"].value_counts().sort_index()
-        logger.info(
-            "Cluster sizes (PCA-based clustering):\n"
-            f"{cluster_counts.to_string()}"
-        )
-        mean_vpd = (
-            df_copy.groupby("cluster")["views_per_day"]
-            .mean()
-            .round(2)
-        )
-        logger.info(
-            "Mean views_per_day by cluster:\n"
-            f"{mean_vpd.to_string()}"
-        )
-
-    return df_copy, pipeline, pca_info
-
-
-def compute_kmeans_elbow(
-    df: pd.DataFrame,
-    k_values: range,
-    text_source: str = "both",
-    random_state: int = 42,
-) -> pd.DataFrame:
-    """
-    Compute KMeans inertia (SSE) for a range of k using the same
-    feature setup as `cluster_videos`, and save an elbow plot.
-
-    Returns a DataFrame with columns: k, inertia.
-    """
-
-    # --- Build the same feature matrix as in cluster_videos ---
-    df_copy = df.copy()
-    df_copy["text_all"] = get_text_series(df_copy, text_source=text_source)
-
-    feature_cols = [
-        "text_all",
-        "duration_minutes",
-        "engagement_rate",
-        "views_per_day",
-        "language",
-    ]
-
-    # Ensure numeric columns are numeric
-    for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-        df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
-
-    # ColumnTransformer identical to cluster_videos
-    preprocess = ColumnTransformer(
-        transformers=[
-            (
-                "text",
-                TfidfVectorizer(
-                    max_features=5000,
-                    ngram_range=(1, 2),
-                    min_df=5,
-                ),
-                "text_all",
-            ),
-            (
-                "numeric",
-                StandardScaler(with_mean=False),
-                ["duration_minutes", "engagement_rate", "views_per_day"],
-            ),
-            (
-                "lang",
-                OneHotEncoder(handle_unknown="ignore"),
-                ["language"],
-            ),
-        ],
-        remainder="drop",
-    )
-
-    X_raw = df_copy[feature_cols]
-
-    logger.info(
-        f"Fitting preprocessing for elbow curve on {len(df_copy)} videos "
-        f"(text_source={text_source})"
-    )
-    X_features = preprocess.fit_transform(X_raw)
-
-    # --- Loop over k and compute inertia ---
-    records = []
-    for k in k_values:
-        logger.info(f"[Elbow] Fitting KMeans for k={k} ...")
-        km = KMeans(
-            n_clusters=k,
-            random_state=random_state,
-            n_init=10,
-        )
-        km.fit(X_features)
-        inertia = km.inertia_
-        logger.info(f"[Elbow] k={k}: inertia={inertia:,.2f}")
-        records.append({"k": k, "inertia": inertia})
-
-    results = pd.DataFrame(records)
-
-    # --- Plot inertia vs k with Plotly and your styling ---
-    fig = px.line(
-        results,
-        x="k",
-        y="inertia",
-        markers=True,
-        title="",
-    )
-    fig.update_traces(mode="lines+markers")
-
-    save_plotly_figure(
-        fig,
-        filename=f"kmeans_elbow_{text_source}",
-        width=1200,
-        height=700,
-        scale=3,
-    )
-
-    return results
 
 
 def run_elbow_analysis(text_source: str = "both") -> None:
+    """Run K-means elbow analysis to select a reasonable number of clusters.
+
+    This function prepares an enriched ASMR video dataset and computes
+    a K-means elbow curve for a range of cluster counts. It first attempts
+    to load a cached, pre-processed dataset from a pickle file; if that
+    does not exist, it rebuilds the dataset from the raw JSON file using
+    the project's preprocessing utilities.
+
+    The analysis proceeds as follows:
+
+    1. Load (or construct) an enriched DataFrame of ASMR videos containing
+       at least the following fields:
+
+       * Basic identifiers and metadata (e.g., ``video_id``, title, etc.).
+       * Duration and engagement-related variables (e.g., ``duration_minutes``,
+         ``views``, ``likes``, ``views_per_day``, ``engagement_rate``,
+         ``language``).
+       * Derived temporal features such as ``days_since_upload``.
+
+    2. Ensure that ``likes_per_day`` is available. For older cached data
+       where this column might be missing, it is backfilled as:
+
+       ``likes_per_day = likes / days_since_upload`` for valid entries.
+
+    3. Call :meth:`Clustering_utils.compute_kmeans_elbow` to fit K-means
+       models over a predefined range of ``k`` values (here ``k=4..20``),
+       using the same feature setup as in the main clustering pipeline.
+
+    4. Log a formatted summary of the resulting inertia values (one per
+       tested ``k``) to facilitate manual inspection of the elbow region.
+
+    Args:
+        text_source: String specifying which text field(s) to use in the
+            clustering features. Typical values are:
+
+            * ``"title"`` – use video titles only,
+            * ``"description"`` – use descriptions only,
+            * ``"both"`` – use concatenated title and description.
+
+            This parameter must be consistent with the rest of the
+            preprocessing and clustering configuration.
+
+    Returns:
+        None. The function is called for its side effects: loading or
+        constructing the dataset, computing the K-means inertia curve,
+        and logging the results. The full elbow DataFrame is returned
+        by :meth:`Clustering_utils.compute_kmeans_elbow` and captured
+        in the local variable ``elbow_df``, but it is not written to
+        disk directly here.
+
+    Notes:
+        * The enriched dataset is expected to be stored in (and loaded
+          from) ``output/analysis/asmr_videos_enriched_{text_source}.pkl``.
+        * The range of ``k`` (here 4–20) can be adjusted if finer or
+          coarser exploration of cluster counts is required.
+        * The function assumes that global instances of the preprocessing
+          and clustering utility classes (``pre_process_class`` and
+          ``clustering_class``) are available in the module scope.
+    """
+    # Derive the path to the analysis directory inside the project output.
     analysis_dir = os.path.join(common.output_dir, "analysis")
+
+    # Path to the enriched dataset pickle for the selected text source.
     enriched_pickle = os.path.join(
         analysis_dir,
         f"asmr_videos_enriched_{text_source}.pkl",
     )
 
+    # Try to load the enriched DataFrame from disk; if not present,
+    # build it from the raw JSON file using the preprocessing utilities.
     if os.path.isfile(enriched_pickle):
         logger.info(f"Loading enriched dataset from pickle {enriched_pickle}")
         df = pd.read_pickle(enriched_pickle)
     else:
         logger.info("No enriched pickle found; building DataFrame from JSON...")
         json_path = common.get_configs("asmr_json_path")
-        data = load_asmr_data(json_path)
-        df = json_to_dataframe(data, text_source=text_source)
+        data = pre_process_class.load_asmr_data(json_path)
+        df = pre_process_class.json_to_dataframe(data, text_source=text_source)
 
-    # Backfill likes_per_day for older pickles if needed
+    # Backfill likes_per_day for older pickles if needed. Some historical
+    # cached datasets may be missing this derived column, so we recompute
+    # it whenever days_since_upload is available.
     if "likes_per_day" not in df.columns and "days_since_upload" in df.columns:
         df["likes_per_day"] = np.where(
             df["days_since_upload"] > 0,
@@ -1705,235 +498,84 @@ def run_elbow_analysis(text_source: str = "both") -> None:
             np.nan,
         )
 
+    # Define the range of k values for which we want to compute
+    # K-means inertia. Here, we scan from k=4 to k=20 inclusive.
     k_values = range(4, 21)  # for example, k = 4..20
-    elbow_df = compute_kmeans_elbow(df, k_values, text_source=text_source)
 
-    logger.info("Elbow results:\n%s", elbow_df.to_string(index=False))
-
-
-# ---------------------------------------------------------------------------
-# Plotly figure helpers for analytics
-# ---------------------------------------------------------------------------
-
-def plot_duration_vs_views(df: pd.DataFrame) -> None:
-    """
-    Hexbin plot: log–log duration (seconds) vs views for all videos.
-    Uses Matplotlib and saves HTML, PNG, and EPS. The HTML is opened
-    in the default browser.
-    """
-    df_plot = df[["duration_seconds", "views"]].copy()
-    df_plot = df_plot.replace([np.inf, -np.inf], np.nan).dropna()
-    df_plot = df_plot[
-        (df_plot["duration_seconds"] > 0) &
-        (df_plot["views"] > 0)
-    ]
-
-    if df_plot.empty:
-        logger.warning("No data for duration vs views plot.")
-        return
-
-    logger.info(
-        f"Duration vs views hexbin plot uses {len(df_plot)} videos with positive "
-        "duration and views."
-    )
-    logger.info(
-        "Duration (seconds) summary for plotted videos:\n"
-        f"{df_plot['duration_seconds'].describe().to_string()}"
-    )
-    logger.info(
-        "Views summary for plotted videos:\n"
-        f"{df_plot['views'].describe().to_string()}"
+    # Compute the elbow curve (k vs inertia) using the project-level
+    # clustering utilities, reusing the same feature engineering as
+    # in the main clustering pipeline.
+    elbow_df = clustering_class.compute_kmeans_elbow(
+        df,
+        k_values,
+        text_source=text_source,
     )
 
-    # Matplotlib hexbin on log–log axes
-    fig, ax = plt.subplots(figsize=(12, 8))
-
-    hb = ax.hexbin(
-        df_plot["duration_seconds"].to_numpy(),
-        df_plot["views"].to_numpy(),
-        gridsize=60,
-        xscale="log",
-        yscale="log",
-        bins="log",
-        mincnt=1,
-    )
-    # Colorbar: control size + font sizes
-    cb = fig.colorbar(
-        hb,
-        ax=ax,
-        shrink=0.9,   # < 1.0 = shorter, > 1.0 = longer
-        aspect=30,    # larger = thinner bar, smaller = thicker bar
-    )
-    cb.set_label("")   # colorbar label size
-    cb.ax.tick_params(labelsize=14)       # colorbar tick label size
-
-    ax.set_xscale("log")
-    ax.set_yscale("log")
-
-    # Bigger axis labels
-    ax.set_xlabel("Duration (seconds)", fontsize=16)
-    ax.set_ylabel("Views", fontsize=16)
-
-    # Bigger tick labels
-    ax.tick_params(axis="both", which="major", labelsize=14)
-    ax.tick_params(axis="both", which="minor", labelsize=12)
-
-    ax.set_title("")
-
-    fig.tight_layout()
-
-    # Save files
-    filename = "duration_vs_views"
-    os.makedirs(common.output_dir, exist_ok=True)
-    output_final = os.path.join(common.root_dir, "figures")
-    os.makedirs(output_final, exist_ok=True)
-
-    png_path = os.path.join(common.output_dir, f"{filename}.png")
-    eps_path = os.path.join(common.output_dir, f"{filename}.eps")
-    html_path = os.path.join(common.output_dir, f"{filename}.html")
-
-    fig.savefig(png_path, format="png", dpi=300, bbox_inches="tight")
-    fig.savefig(eps_path, format="eps", dpi=300, bbox_inches="tight")
-
-    final_png_path = os.path.join(output_final, f"{filename}.png")
-    final_eps_path = os.path.join(output_final, f"{filename}.eps")
-    shutil.copy(png_path, final_png_path)
-    shutil.copy(eps_path, final_eps_path)
-
-    # Simple HTML referencing the PNG (works from both output/ and figures/)
-    rel_png_name = f"{filename}.png"
-    html_content = f"""<!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset='utf-8'>
-        <title>{filename}</title>
-    </head>
-    <body>
-        <img src='{rel_png_name}' alt='{filename}' />
-    </body>
-    </html>
-    """
-
-    with open(html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-    final_html_path = os.path.join(output_final, f"{filename}.html")
-    with open(final_html_path, "w", encoding="utf-8") as f:
-        f.write(html_content)
-
-    plt.close(fig)
-
-    # Try to auto-open the HTML file in the default browser
-    try:
-        abs_html = os.path.abspath(html_path)
-        webbrowser.open(f"file://{abs_html}", new=2)
-        logger.info(f"Opened HTML for {filename} at {abs_html}")
-    except Exception as exc:
-        logger.warning(f"Could not auto-open HTML for {filename}: {exc}")
-
-
-def analyze_log_views_normality(df: pd.DataFrame) -> None:
-    """
-    Check whether log10(views) is approximately normally distributed.
-    """
-    views = pd.to_numeric(df["views"], errors="coerce")
-    views = views[views > 0].dropna()
-
-    if views.empty:
-        logger.warning("No positive views available; cannot analyze normality.")
-        return
-
-    log_views = np.log10(views)
-
-    logger.info("===== LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
-    logger.info(f"N = {len(log_views)}")
-    logger.info(f"Mean(log10(views)) = {log_views.mean():.3f}")
-    logger.info(f"Std(log10(views))  = {log_views.std():.3f}")
-
-    k2, p_normaltest = stats.normaltest(log_views)
-    logger.info(
-        f"normaltest: statistic = {k2:.3f}, p-value = {p_normaltest:.3g} "
-        "(H0: data come from a normal distribution)"
-    )
-
-    sample = log_views
-    max_n_shapiro = 5000
-    if len(sample) > max_n_shapiro:
-        sample = sample.sample(max_n_shapiro, random_state=42)  # type: ignore
-
-    w_stat, p_shapiro = stats.shapiro(sample)
-    logger.info(
-        f"Shapiro–Wilk: W = {w_stat:.3f}, p-value = {p_shapiro:.3g} "
-        "(H0: data come from a normal distribution)"
-    )
-
-    logger.info(
-        "Interpretation: if p-values are << 0.05, log10(views) deviates from a "
-        "perfect Gaussian; larger p-values mean you cannot reject normality."
-    )
-
-    try:
-        (osm, osr), (slope, intercept, r) = stats.probplot(
-            log_views, dist="norm", plot=None
-        )
-
-        qq_df = pd.DataFrame(
-            {
-                "theoretical_quantiles": osm,
-                "ordered_log_views": osr,
-            }
-        )
-
-        fig = px.scatter(
-            qq_df,
-            x="theoretical_quantiles",
-            y="ordered_log_views",
-            title="",
-            labels={
-                "theoretical_quantiles": "Theoretical quantiles (Normal)",
-                "ordered_log_views": "Ordered log10(views)",
-            },
-            opacity=0.7,
-        )
-
-        x_min = qq_df["theoretical_quantiles"].min()
-        x_max = qq_df["theoretical_quantiles"].max()
-        line_x = np.array([x_min, x_max])
-        line_y = slope * line_x + intercept  # type: ignore
-
-        fig.add_scatter(
-            x=line_x,
-            y=line_y,
-            mode="lines",
-            line=dict(dash="dash"),
-            showlegend=False,
-        )
-
-        save_plotly_figure(
-            fig,
-            filename="log_views_qq_plot",
-            width=1600,
-            height=900,
-            scale=SCALE,
-        )
-
-        logger.info(
-            "Q–Q plot for log10(views) saved as 'log_views_qq_plot.*'. "
-            "Points close to the dashed line indicate approximate normality."
-        )
-    except Exception as exc:
-        logger.warning(f"Could not create Q–Q plot for log10(views): {exc}")
-
-    logger.info("===== END LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
+    # Log a neatly formatted summary of the elbow results. The logged
+    # table shows inertia for each tested k, which helps in visually
+    # identifying the elbow region (where marginal gains diminish).
+    logger.info(f"Elbow results:\n{elbow_df.to_string(index=False)}")
 
 
 def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
-    """Plot language-level engagement / growth statistics."""
+    """Plot language-level engagement and growth statistics.
+
+    This function visualizes language-level performance metrics for ASMR
+    videos based on a precomputed summary DataFrame. It produces two bar
+    charts using Plotly:
+
+    1. Mean views per day by language (for languages with sufficient data).
+    2. Mean engagement rate (likes / views) by language.
+
+    The input ``lang_stats`` DataFrame is expected to contain one row per
+    language with summary statistics computed upstream, including at least:
+
+    * ``language``: Language label (string).
+    * ``video_count``: Number of videos for the language.
+    * ``mean_views_per_day``: Average views per day across videos.
+    * ``mean_engagement_rate``: Average engagement rate (likes / views).
+
+    The function applies a minimum video-count threshold so that very rare
+    languages (with few videos) do not dominate or clutter the plots.
+    It also logs which languages have the highest mean views per day and
+    highest mean engagement rate, providing a textual summary that can be
+    inspected alongside the figures.
+
+    Args:
+        lang_stats: A pandas DataFrame with per-language summary statistics
+            (e.g., as returned by a language-level aggregation function).
+            Must include at least ``language``, ``video_count``,
+            ``mean_views_per_day``, and ``mean_engagement_rate`` columns.
+        min_videos: Minimum number of videos required for a language to be
+            included in the plots. Languages with fewer than this number of
+            videos are filtered out to avoid unstable or noisy estimates.
+
+    Returns:
+        None. The function is executed for its side effects:
+        it filters and logs summary information and writes two Plotly-based
+        bar charts to disk via ``plot_class.save_plotly_figure``:
+
+        * ``language_mean_views_per_day.*``
+        * ``language_mean_engagement_rate.*``
+
+    Notes:
+        * If ``lang_stats`` is empty or no languages meet the ``min_videos``
+          threshold, the function logs a warning and exits without
+          generating plots.
+        * The global ``plot_class`` instance and ``SCALE`` constant are
+          assumed to be defined at module level and encapsulate project-wide
+          figure styling and export behavior.
+    """
+    # If there is no language-level data at all, we cannot produce any plot.
     if lang_stats.empty:
         logger.warning("Language stats DataFrame is empty; skipping plots.")
         return
 
+    # Work on a copy to avoid modifying the original DataFrame.
     df_plot = lang_stats.copy()
+
+    # Keep only languages with at least `min_videos` videos to ensure
+    # that plotted statistics are based on reasonably sized samples.
     df_plot = df_plot[df_plot["video_count"] >= min_videos]
     if df_plot.empty:
         logger.warning(
@@ -1941,11 +583,15 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
         )
         return
 
+    # Log how many languages pass the threshold and will appear in the plots.
     logger.info(
         f"Language stats include {len(df_plot)} languages with at least "
         f"{min_videos} videos each."
     )
 
+    # ----------------------------------------------------------------------
+    # Identify and log the language with highest mean views per day.
+    # ----------------------------------------------------------------------
     df_views = df_plot.sort_values("mean_views_per_day", ascending=False)
     top_vpd = df_views.iloc[0]
     logger.info(
@@ -1955,6 +601,9 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
         f"mean_views_per_day={top_vpd['mean_views_per_day']:.2f})"
     )
 
+    # ----------------------------------------------------------------------
+    # Identify and log the language with highest mean engagement rate.
+    # ----------------------------------------------------------------------
     df_eng = df_plot.sort_values("mean_engagement_rate", ascending=False)
     top_eng = df_eng.iloc[0]
     logger.info(
@@ -1964,6 +613,9 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
         f"mean_engagement_rate={top_eng['mean_engagement_rate']:.4f})"
     )
 
+    # ----------------------------------------------------------------------
+    # Plot: mean views per day by language.
+    # ----------------------------------------------------------------------
     fig = px.bar(
         df_views,
         x="language",
@@ -1971,15 +623,13 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
         title="",
         labels={"language": "Language", "mean_views_per_day": "Mean views per day"},
     )
+    # Angle x-axis labels to improve readability when there are many languages.
     fig.update_xaxes(tickangle=45)
-    save_plotly_figure(
-        fig,
-        "language_mean_views_per_day",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
+    plot_class.save_plotly_figure(fig, "language_mean_views_per_day", width=1600, height=900, scale=SCALE)
 
+    # ----------------------------------------------------------------------
+    # Plot: mean engagement rate by language.
+    # ----------------------------------------------------------------------
     fig = px.bar(
         df_eng,
         x="language",
@@ -1990,261 +640,9 @@ def plot_language_stats(lang_stats: pd.DataFrame, min_videos: int = 20) -> None:
             "mean_engagement_rate": "Mean engagement rate",
         },
     )
+    # Again, rotate the labels to prevent overlap.
     fig.update_xaxes(tickangle=45)
-    save_plotly_figure(
-        fig,
-        "language_mean_engagement_rate",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-
-def plot_title_style_stats(title_stats: pd.DataFrame) -> None:
-    """Plot engagement vs title length buckets."""
-    if title_stats.empty:
-        logger.warning("Title stats DataFrame is empty; skipping plots.")
-        return
-
-    df_plot = title_stats.copy()
-    order = ["<=5 words", "6–10 words", "11–20 words", ">20 words"]
-    df_plot["title_length_bucket"] = pd.Categorical(
-        df_plot["title_length_bucket"], categories=order, ordered=True
-    )
-    df_plot = df_plot.sort_values("title_length_bucket")
-
-    logger.info(
-        "Title length statistics (mean engagement rate and views):\n"
-        f"{df_plot.to_string(index=False)}"
-    )
-
-    fig = px.bar(
-        df_plot,
-        x="title_length_bucket",
-        y="mean_engagement_rate",
-        title="",
-        labels={
-            "title_length_bucket": "Title length",
-            "mean_engagement_rate": "Mean engagement rate",
-        },
-    )
-    save_plotly_figure(
-        fig,
-        "title_length_mean_engagement_rate",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-    fig = px.bar(
-        df_plot,
-        x="title_length_bucket",
-        y="mean_views",
-        title="",
-        labels={
-            "title_length_bucket": "Title length",
-            "mean_views": "Mean views",
-        },
-    )
-    save_plotly_figure(
-        fig,
-        "title_length_mean_views",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-
-def plot_theme_growth_box(df: pd.DataFrame, theme_col: str) -> None:
-    """Boxplot of views_per_day for videos with/without a given theme."""
-    if theme_col not in df.columns:
-        logger.warning(f"Theme column {theme_col} not present; skipping boxplot.")
-        return
-
-    df_plot = df[["views_per_day", theme_col]].dropna(subset=["views_per_day"])
-    if df_plot.empty:
-        logger.warning(
-            f"No non-missing views_per_day data for theme {theme_col}; skipping boxplot."
-        )
-        return
-
-    logger.info(
-        f"Theme growth boxplot for {theme_col} with {len(df_plot)} videos "
-        "having non-missing views_per_day."
-    )
-    counts = df_plot[theme_col].value_counts()
-    logger.info(
-        f"Counts by {theme_col} flag (False/True):\n{counts.to_string()}"
-    )
-
-    fig = px.box(
-        df_plot,
-        x=theme_col,
-        y="views_per_day",
-        title="",
-        labels={
-            theme_col: f"{theme_col} (False / True)",
-            "views_per_day": "Views per day",
-        },
-    )
-    filename = f"{theme_col}_views_per_day_boxplot"
-    save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
-
-
-def plot_language_growth(lang_growth: pd.DataFrame, min_total_videos: int = 50) -> None:
-    """Line chart for growth of ASMR per language (videos per year)."""
-    if lang_growth.empty:
-        logger.warning("Language growth DataFrame is empty; skipping plot.")
-        return
-
-    df_plot = lang_growth.copy()
-    totals = df_plot.groupby("language")["video_count"].sum().reset_index()
-    keep_langs = totals[totals["video_count"] >= min_total_videos]["language"]
-    df_plot = df_plot[df_plot["language"].isin(keep_langs)]
-    if df_plot.empty:
-        logger.warning(
-            f"No languages with at least {min_total_videos} total videos; "
-            "skipping language growth plot."
-        )
-        return
-
-    df_plot = df_plot.sort_values(["language", "upload_year"])
-
-    logger.info(
-        "Language growth includes "
-        f"{len(df_plot)} rows for {df_plot['language'].nunique()} languages "
-        f"over years {int(df_plot['upload_year'].min())}"
-        f"–{int(df_plot['upload_year'].max())}."
-    )
-
-    fig = px.line(
-        df_plot,
-        x="upload_year",
-        y="video_count",
-        color="language",
-        markers=True,
-        title="",
-        labels={
-            "upload_year": "Year",
-            "video_count": "Number of videos",
-            "language": "Language",
-        },
-    )
-
-    # Make the dots bigger
-    fig.update_traces(
-        mode="lines+markers",
-        marker=dict(
-            size=10,        # increase this number for larger dots (e.g. 8, 10, 12)
-            line=dict(width=1),
-        ),
-    )
-
-    save_plotly_figure(
-        fig,
-        "language_growth_over_years",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-
-def plot_theme_trend_overall(trend_df: pd.DataFrame, theme_col: str) -> None:
-    """Trend of number of themed videos over years (all languages combined)."""
-    if trend_df.empty:
-        logger.warning(
-            f"Trend DataFrame for {theme_col} is empty; skipping overall trend plot."
-        )
-        return
-
-    df_plot = trend_df.copy()
-    if "theme_count" not in df_plot.columns:
-        logger.warning(
-            f"'theme_count' column not found in trend_df for {theme_col}; "
-            "skipping overall theme trend plot."
-        )
-        return
-
-    logger.info(
-        f"Overall theme trend for {theme_col}: "
-        f"{len(df_plot)} years, total themed videos="
-        f"{int(df_plot['theme_count'].sum())}."
-    )
-
-    fig = px.line(
-        df_plot,
-        x="upload_year",
-        y="theme_count",
-        title="",
-        labels={
-            "upload_year": "Year",
-            "theme_count": f"Number of videos with {theme_col}",
-        },
-        markers=True,
-    )
-
-    fig.update_traces(
-        mode="lines+markers",
-        marker=dict(
-            size=10,        # increase this number for larger dots (e.g. 8, 10, 12)
-            line=dict(width=1),
-        ),
-    )
-
-    filename = f"{theme_col}_trend_overall_fig"
-    save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
-
-
-def plot_theme_trend_by_language(trend_df: pd.DataFrame, theme_col: str, min_videos: int = 30) -> None:
-    """Trend of number of themed videos over years by language."""
-    if trend_df.empty:
-        logger.warning(
-            f"Trend DataFrame for {theme_col} by language is empty; skipping plot."
-        )
-        return
-
-    df_plot = trend_df.copy()
-    if "theme_count" not in df_plot.columns:
-        logger.warning(
-            f"'theme_count' column not found in trend_df for {theme_col}; "
-            "skipping theme trend by language plot."
-        )
-        return
-
-    counts = (
-        df_plot.groupby("language")["theme_count"]
-        .count()
-        .reset_index(name="n")
-    )
-    keep_langs = counts[counts["n"] >= min_videos]["language"]
-    df_plot = df_plot[df_plot["language"].isin(keep_langs)]
-    if df_plot.empty:
-        logger.warning(
-            f"No languages with at least {min_videos} year-groups for theme {theme_col}; "
-            "skipping by-language trend plot."
-        )
-        return
-
-    logger.info(
-        f"Theme trend by language for {theme_col}: "
-        f"{len(df_plot)} rows across {df_plot['language'].nunique()} languages."
-    )
-
-    fig = px.line(
-        df_plot,
-        x="upload_year",
-        y="theme_count",
-        color="language",
-        markers=True,
-        title="",
-        labels={
-            "upload_year": "Year",
-            "theme_count": f"Number of videos with {theme_col}",
-            "language": "Language",
-        },
-    )
-    filename = f"{theme_col}_trend_by_language_fig"
-    save_plotly_figure(fig, filename, width=1600, height=900, scale=SCALE)
+    plot_class.save_plotly_figure(fig, "language_mean_engagement_rate", width=1600, height=900, scale=SCALE)
 
 
 def plot_monthly_counts(monthly_counts: pd.DataFrame) -> None:
@@ -2270,361 +668,12 @@ def plot_monthly_counts(monthly_counts: pd.DataFrame) -> None:
         title="",
         labels={"year_month": "Month", "video_count": "Number of videos"},
     )
-    save_plotly_figure(
-        fig,
-        "monthly_video_counts",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-
-def _get_cluster_color_map(clusters: np.ndarray) -> Dict[str, str]:
-    """
-    Return a stable mapping from cluster id (as string) to a fixed color.
-    This ensures that cluster '0' is always the same color, '1' is another, etc.
-    """
-    unique_clusters = sorted(int(c) for c in np.unique(clusters))
-    cluster_labels = [str(c) for c in unique_clusters]
-
-    palette = px.colors.qualitative.Plotly
-
-    color_map: Dict[str, str] = {}
-    for i, label in enumerate(cluster_labels):
-        color_map[label] = palette[i % len(palette)]
-
-    return color_map
-
-
-def plot_cluster_distribution(
-    clustered_df: pd.DataFrame,
-    name_suffix: str = "",
-    highlight_cluster: Optional[int] = None,
-) -> None:
-    """Visualize clusters: bar charts + 2D scatter with circles around clusters."""
-    if "cluster" not in clustered_df.columns:
-        logger.warning("No 'cluster' column in clustered_df; skipping cluster plots.")
-        return
-
-    df_plot = clustered_df.copy()
-    suffix = f"_{name_suffix}" if name_suffix else ""
-
-    agg = (
-        df_plot.groupby("cluster")
-        .agg(
-            video_count=("video_id", "count"),
-            mean_views=("views", "mean"),
-            mean_views_per_day=("views_per_day", "mean"),
-        )
-        .reset_index()
-    )
-
-    logger.info(
-        f"Cluster distribution summary (suffix='{name_suffix}'):\n"
-        f"{agg.to_string(index=False)}"
-    )
-
-    fig = px.bar(
-        agg,
-        x="cluster",
-        y="video_count",
-        title="",
-        labels={"cluster": "Cluster", "video_count": "Number of videos"},
-    )
-    save_plotly_figure(
-        fig,
-        f"cluster_sizes{suffix}",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-    fig = px.bar(
-        agg,
-        x="cluster",
-        y="mean_views_per_day",
-        title="",
-        labels={
-            "cluster": "Cluster",
-            "mean_views_per_day": "Mean views per day",
-        },
-    )
-    save_plotly_figure(
-        fig,
-        f"cluster_mean_views_per_day{suffix}",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-    if "embedding_x" not in df_plot.columns or "embedding_y" not in df_plot.columns:
-        logger.warning(
-            "No embedding_x / embedding_y columns found; skipping cluster scatter plot."
-        )
-        return
-
-    df_emb = df_plot.dropna(subset=["embedding_x", "embedding_y"]).copy()
-    if df_emb.empty:
-        logger.warning(
-            "Embedding columns are empty; skipping cluster scatter plot."
-        )
-        return
-
-    df_emb["cluster"] = df_emb["cluster"].astype(int)
-    df_emb["cluster_str"] = df_emb["cluster"].astype(str)
-    cluster_order = sorted(df_emb["cluster_str"].unique())
-    color_discrete_map = _get_cluster_color_map(df_emb["cluster"].values)  # type: ignore
-
-    fig = px.scatter(
-        df_emb,
-        x="embedding_x",
-        y="embedding_y",
-        color="cluster_str",
-        hover_data=["video_id", "title", "language", "views", "duration_minutes"],
-        title="",
-        labels={
-            "embedding_x": "",
-            "embedding_y": "",
-            "cluster_str": "",
-        },
-        category_orders={"cluster_str": cluster_order},
-        color_discrete_map=color_discrete_map,
-    )
-
-    # Optionally highlight a single cluster (larger markers + black outline)
-    if highlight_cluster is not None:
-        highlight_label = str(highlight_cluster)
-
-        fig.for_each_trace(
-            lambda trace: trace.update(
-                marker=dict(
-                    size=10,
-                    line=dict(width=2, color="black"),
-                )
-            )
-            if trace.name == highlight_label
-            else trace.update(
-                marker=dict(
-                    size=5,
-                    opacity=0.3,
-                )
-            )
-        )
-
-    shapes = []
-    for cluster_id, group in df_emb.groupby("cluster"):
-        if len(group) < 2:
-            continue
-
-        cx = group["embedding_x"].mean()
-        cy = group["embedding_y"].mean()
-        distances = np.sqrt(
-            (group["embedding_x"] - cx) ** 2 + (group["embedding_y"] - cy) ** 2
-        )
-
-        radius = float(distances.quantile(0.8))  # type: ignore
-        if not np.isfinite(radius) or radius <= 0:
-            continue
-
-        shapes.append(
-            dict(
-                type="circle",
-                xref="x",
-                yref="y",
-                x0=cx - radius,
-                y0=cy - radius,
-                x1=cx + radius,
-                y1=cy + radius,
-                line=dict(width=1, dash="dot"),
-                opacity=0.3,
-            )
-        )
-
-    if shapes:
-        fig.update_layout(shapes=shapes)
-
-    save_plotly_figure(
-        fig,
-        f"cluster_scatter_embedding{suffix}",
-        width=1600,
-        height=900,
-        scale=SCALE,
-    )
-
-
-def cluster_videos_tsne(df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42, text_source: str = "both",
-                        tsne_perplexity: float = 30.0, tsne_learning_rate: float = 200.0,
-                        tsne_n_iter: int = 1000) -> Tuple[pd.DataFrame, Optional[Pipeline]]:
-    """
-    Same idea as `cluster_videos`, but the 2D embedding used for visualization
-    is computed with t-SNE (after an SVD pre-step for speed).
-    """
-    df_copy = df.copy()
-    df_copy["text_all"] = get_text_series(df_copy, text_source=text_source)
-
-    feature_cols = [
-        "text_all",
-        "duration_minutes",
-        "engagement_rate",
-        "views_per_day",
-        "language",
-    ]
-
-    for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-        df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
-
-    preprocess = ColumnTransformer(
-        transformers=[
-            (
-                "text",
-                TfidfVectorizer(
-                    max_features=5000,
-                    ngram_range=(1, 2),
-                    min_df=5,
-                ),
-                "text_all",
-            ),
-            (
-                "numeric",
-                StandardScaler(with_mean=False),
-                ["duration_minutes", "engagement_rate", "views_per_day"],
-            ),
-            (
-                "lang",
-                OneHotEncoder(handle_unknown="ignore"),
-                ["language"],
-            ),
-        ],
-        remainder="drop",
-    )
-
-    pipeline = Pipeline(
-        steps=[
-            ("preprocess", preprocess),
-            (
-                "cluster",
-                KMeans(
-                    n_clusters=n_clusters,
-                    random_state=random_state,
-                    n_init=10,
-                ),
-            ),
-        ]
-    )
-
-    X = df_copy[feature_cols]
-    logger.info(
-        f"Fitting clustering model with t-SNE embedding on {len(df_copy)} videos "
-        f"(text_source={text_source}, n_clusters={n_clusters})"
-    )
-    pipeline.fit(X)
-
-    logger.info("Assigning cluster labels (t-SNE version)...")
-    df_copy["cluster"] = pipeline.predict(X)
-
-    try:
-        logger.info("Computing 2D t-SNE embedding for cluster visualization...")
-        features = pipeline.named_steps["preprocess"].transform(X)
-
-        n_features = features.shape[1]
-        n_samples = features.shape[0]
-        max_components = min(n_features, n_samples - 1)
-
-        if max_components >= 2:
-            svd = TruncatedSVD(
-                n_components=max_components,
-                random_state=random_state,
-            )
-            features_reduced = svd.fit_transform(features)
-            logger.info(
-                f"Reduced feature space to {max_components} dimensions via TruncatedSVD "
-                f"before t-SNE."
-            )
-        else:
-            features_reduced = (
-                features.toarray() if hasattr(features, "toarray") else np.array(features)
-            )
-            logger.info(
-                "Skipped SVD reduction before t-SNE because dataset is very small."
-            )
-
-        tsne = TSNE(
-            n_components=2,
-            perplexity=tsne_perplexity,
-            learning_rate=tsne_learning_rate,
-            random_state=random_state,
-            init="random",
-        )
-        embedding_2d = tsne.fit_transform(features_reduced)
-
-        df_copy["embedding_x"] = embedding_2d[:, 0]
-        df_copy["embedding_y"] = embedding_2d[:, 1]
-
-        logger.info(
-            "Completed t-SNE embedding with "
-            f"{embedding_2d.shape[0]} points."
-        )
-
-        if "cluster" in df_copy.columns:
-            cluster_counts = df_copy["cluster"].value_counts().sort_index()
-            logger.info(
-                "Cluster sizes (t-SNE embedding version):\n"
-                f"{cluster_counts.to_string()}"
-            )
-
-    except Exception as exc:
-        logger.warning(f"Could not compute 2D t-SNE embedding for clusters: {exc}")
-        df_copy["embedding_x"] = np.nan
-        df_copy["embedding_y"] = np.nan
-
-    return df_copy, pipeline
-
-
-def describe_clusters(clustered_df: pd.DataFrame, top_n_languages: int = 3) -> pd.DataFrame:
-    """
-    Produce a summary description per cluster to help interpret what it 'is'.
-    """
-    df = clustered_df.copy()
-
-    theme_cols = [
-        c for c in df.columns
-        if c.startswith("has_") and df[c].dtype == bool
-    ]
-
-    summaries = []
-    for cluster_id, group in df.groupby("cluster"):
-        row: Dict[str, Any] = {
-            "cluster": int(cluster_id),  # type: ignore
-            "n_videos": len(group),
-        }
-
-        for col in ["views", "views_per_day", "likes", "likes_per_day", "duration_minutes", "engagement_rate"]:
-            if col in group.columns:
-                row[f"mean_{col}"] = float(group[col].mean(skipna=True))
-
-        if "language" in group.columns:
-            lang_counts = group["language"].value_counts()
-            top_langs = lang_counts.head(top_n_languages)
-            row["top_languages"] = "; ".join(
-                f"{lang} ({cnt})" for lang, cnt in top_langs.items()
-            )
-
-        for tcol in theme_cols:
-            row[f"share_{tcol}"] = float(group[tcol].mean())
-
-        summaries.append(row)
-
-    cluster_desc = pd.DataFrame(summaries).sort_values("cluster").reset_index(drop=True)
-    logger.info(
-        "Cluster interpretation summary:\n"
-        f"{cluster_desc.to_string(index=False)}"
-    )
-    return cluster_desc
-
+    plot_class.save_plotly_figure(fig, "monthly_video_counts", width=1600, height=900, scale=SCALE)
 
 # ---------------------------------------------------------------------------
 # Dataset summary
 # ---------------------------------------------------------------------------
+
 
 def print_dataset_summary(df: pd.DataFrame) -> None:
     """Log basic summary: N videos, oldest/newest video, mean/SD duration, views, likes."""
@@ -2726,7 +775,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         df = pd.read_pickle(enriched_pickle)
     else:
         logger.info("No enriched pickle found; building DataFrame from JSON...")
-        df = json_to_dataframe(data, text_source=text_source)
+        df = pre_process_class.json_to_dataframe(data, text_source=text_source)
         logger.info(f"Saving enriched dataset to pickle {enriched_pickle}")
         df.to_pickle(enriched_pickle)
 
@@ -2740,33 +789,33 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
     logger.info(f"Saving enriched dataset CSV to {enriched_csv}")
     df.to_csv(enriched_csv, index=False)
 
-    duration_stats = summarize_by_duration_bucket(df)
+    duration_stats = summary_class.summarize_by_duration_bucket(df)
     duration_stats.to_csv(
         os.path.join(analysis_dir, "duration_stats.csv"),
         index=False,
     )
 
-    plot_duration_vs_views(df)
+    plot_class.plot_duration_vs_views(df)
 
-    analyze_log_views_normality(df)
+    plot_class.analyze_log_views_normality(df)
 
-    lang_stats = summarize_by_language(df)
+    lang_stats = summary_class.summarize_by_language(df)
     lang_stats.to_csv(
         os.path.join(analysis_dir, "language_stats.csv"),
         index=False,
     )
     plot_language_stats(lang_stats)
 
-    title_stats = summarize_title_styles(df)
+    title_stats = summary_class.summarize_title_styles(df)
     title_stats.to_csv(
         os.path.join(analysis_dir, "title_style_stats.csv"),
         index=False,
     )
-    plot_title_style_stats(title_stats)
+    viz_summary.plot_title_style_stats(title_stats)
 
     for theme in ["has_whisper", "has_no_talking", "has_sleep", "has_binaural", "has_drive"]:
         if theme in df.columns:
-            theme_stats = summarize_theme_vs_growth(df, theme)
+            theme_stats = summary_class.summarize_theme_vs_growth(df, theme)
             theme_stats.to_csv(
                 os.path.join(analysis_dir, f"{theme}_growth_stats.csv"),
                 index=False,
@@ -2787,28 +836,28 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
                 index=False,
             )
 
-            plot_theme_growth_box(df, theme)
+            viz_summary.plot_theme_growth_box(df, theme)
 
-    monthly_counts = compute_monthly_video_counts(df)
+    monthly_counts = summary_class.compute_monthly_video_counts(df)
     monthly_counts.to_csv(
         os.path.join(analysis_dir, "monthly_video_counts.csv"),
         index=False,
     )
     plot_monthly_counts(monthly_counts)
 
-    lang_growth = compute_language_growth(df)
+    lang_growth = summary_class.compute_language_growth(df)
     lang_growth.to_csv(
         os.path.join(analysis_dir, "language_growth.csv"),
         index=False,
     )
-    plot_language_growth(lang_growth)
+    viz_summary.plot_language_growth(lang_growth)
 
     for theme in ["has_no_talking", "has_binaural"]:
         if theme in df.columns:
-            trend_all = compute_theme_trend_over_time(
+            trend_all = summary_class.compute_theme_trend_over_time(
                 df, theme_col=theme, by_language=False
             )
-            trend_lang = compute_theme_trend_over_time(
+            trend_lang = summary_class.compute_theme_trend_over_time(
                 df, theme_col=theme, by_language=True
             )
 
@@ -2821,10 +870,10 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
                 index=False,
             )
 
-            plot_theme_trend_overall(trend_all, theme)
-            plot_theme_trend_by_language(trend_lang, theme)
+            viz_summary.plot_theme_trend_overall(trend_all, theme)
+            viz_summary.plot_theme_trend_by_language(trend_lang, theme)
 
-    drive_trend = compute_theme_trend_over_time(
+    drive_trend = summary_class.compute_theme_trend_over_time(
         df,
         theme_col="has_drive",
         by_language=False,
@@ -2834,7 +883,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
             os.path.join(analysis_dir, "drive_trend_overall.csv"),
             index=False,
         )
-        plot_theme_trend_overall(drive_trend, theme_col="drive")
+        viz_summary.plot_theme_trend_overall(drive_trend, theme_col="drive")
 
     # ------------------------------------------------------------------
     # KMeans clustering (PCA embedding) with PKL caching
@@ -2851,7 +900,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         pca_info = None
     else:
         logger.info("No clustered pickle found; running KMeans clustering...")
-        clustered_df, pipeline, pca_info = cluster_videos(
+        clustered_df, pipeline, pca_info = clustering_class.cluster_videos(
             df, n_clusters=11, text_source=text_source
         )
         logger.info(f"Saving clustered dataset to pickle {cluster_pickle}")
@@ -2899,7 +948,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         )
         logger.info(f"Cluster summary saved to {cluster_summary_csv}")
 
-        cluster_desc = describe_clusters(clustered_df)
+        cluster_desc = clustering_class.describe_clusters(clustered_df)
         cluster_desc_csv = os.path.join(analysis_dir, "cluster_descriptions.csv")
         cluster_desc.to_csv(cluster_desc_csv, index=False)
         logger.info(f"Cluster descriptions saved to {cluster_desc_csv}")
@@ -2928,7 +977,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         logger.info(f"2D PCA embedding for clusters saved to {embedding_csv}")
 
         # Stable colors; highlight_cluster can be set here if desired
-        plot_cluster_distribution(clustered_df, name_suffix="pca")
+        clustering_class.plot_cluster_distribution(clustered_df, name_suffix="pca")
 
     #     # ------------------------------------------------------------------
     #     # t-SNE embedding of clusters with PKL caching
@@ -2939,35 +988,27 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         )
 
         if os.path.isfile(tsne_cluster_pickle):
-            logger.info(
-                f"Loading t-SNE clustered dataset from pickle {tsne_cluster_pickle}"
-            )
+            logger.info(f"Loading t-SNE clustered dataset from pickle {tsne_cluster_pickle}")
             clustered_tsne_df = pd.read_pickle(tsne_cluster_pickle)
         else:
-            logger.info(
-                "No t-SNE clustered pickle found; computing t-SNE embedding..."
-            )
-            clustered_tsne_df, tsne_pipeline = cluster_videos_tsne(
+            logger.info("No t-SNE clustered pickle found; computing t-SNE embedding...")
+            clustered_tsne_df, tsne_pipeline = clustering_class.cluster_videos_tsne(
                 df, n_clusters=11, text_source=TEXT_SOURCE
             )
-            logger.info(
-                f"Saving t-SNE clustered dataset to pickle {tsne_cluster_pickle}"
-            )
+            logger.info(f"Saving t-SNE clustered dataset to pickle {tsne_cluster_pickle}")
             clustered_tsne_df.to_pickle(tsne_cluster_pickle)
 
-        plot_tsne_research(clustered_tsne_df)
+        clustering_class.plot_tsne_research(clustered_tsne_df)
 
-        tsne_embedding_csv = os.path.join(
-            analysis_dir,
-            "cluster_embedding_2d_tsne.csv",
-        )
+        tsne_embedding_csv = os.path.join(analysis_dir, "cluster_embedding_2d_tsne.csv")
+
         if {"embedding_x", "embedding_y"}.issubset(clustered_tsne_df.columns):
             clustered_tsne_df[emb_cols].to_csv(tsne_embedding_csv, index=False)
             logger.info(
                 f"2D t-SNE embedding for clusters saved to {tsne_embedding_csv}"
             )
 
-        plot_cluster_distribution(clustered_tsne_df, name_suffix="tsne")
+        clustering_class.plot_cluster_distribution(clustered_tsne_df, name_suffix="tsne")
 
     logger.info(
         f"Analytics pipeline complete. CSVs and figures written to {analysis_dir}"
@@ -2981,7 +1022,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
 def main() -> None:
     json_path = os.path.join(common.get_configs("data"), "asmr_results.json")
     logger.info(f"Loading ASMR data from {json_path}")
-    data = load_asmr_data(json_path)
+    data = pre_process_class.load_asmr_data(json_path)
 
     analysis_dir = os.path.join(common.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
@@ -2990,7 +1031,7 @@ def main() -> None:
     run_wordcloud_pipeline(data, text_source=TEXT_SOURCE)
 
     # verb-only lemma wordcloud (cached)
-    run_verb_lemma_wordcloud_pipeline(
+    key_class.run_verb_lemma_wordcloud_pipeline(
         data,
         text_source=TEXT_SOURCE,
         model_name="en_core_web_sm",
@@ -3007,7 +1048,7 @@ def main() -> None:
         keyword_df = pd.read_pickle(keyword_pickle)
     else:
         logger.info("No spaCy keyword pickle found; computing keyword counts...")
-        keyword_df = compute_spacy_keyword_counts(
+        keyword_df = key_class.compute_spacy_keyword_counts(
             data,
             target_lemmas=None,
             text_source=TEXT_SOURCE,
@@ -3028,8 +1069,5 @@ def main() -> None:
 
 
 if __name__ == "__main__":
-    logging.basicConfig(
-        level=logging.INFO,
-        format="%(asctime)s [%(levelname)s] %(name)s: %(message)s",
-    )
+
     main()

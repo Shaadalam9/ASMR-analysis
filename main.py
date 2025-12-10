@@ -117,6 +117,11 @@ DetectorFactory.seed = 0
 data_folder = common.get_configs("data")
 
 
+# Logging
+logs(show_level=common.get_configs("logger_level"), show_color=True)
+logger = CustomLogger(__name__)
+
+
 class ASMRFetcher:
     """Fetch, enrich, and persist query-related videos from YouTube."""
 
@@ -144,10 +149,6 @@ class ASMRFetcher:
         self.seen_file = os.path.join(self.data_folder, seen_file)
         self.json_output = os.path.join(self.data_folder, json_output)
 
-        # Logging
-        logs(show_level=common.get_configs("logger_level"), show_color=True)
-        self.logger = CustomLogger(__name__)
-
         # Date filters
         self.published_before = self._normalize_published_bound(published_before)
         self.published_after = self._normalize_published_bound(published_after)
@@ -167,7 +168,7 @@ class ASMRFetcher:
         if self.api_keys:
             self._init_youtube_for_current_key()
         else:
-            self.logger.info(
+            logger.info(
                 "No YouTube Data API key provided. Using only pytubefix Search for discovery."
             )
 
@@ -190,20 +191,20 @@ class ASMRFetcher:
             )
             total_keys = len(self.api_keys)
             current = self._current_key_index + 1
-            self.logger.info(
+            logger.info(
                 f"YouTube Data API enabled with {total_keys} API key(s). Using key {current}/{total_keys}."
             )
             if self.published_before or self.published_after:
-                self.logger.info(
+                logger.info(
                     f"Using date filter: published_after={self.published_after}, "
                     f"published_before={self.published_before}"
                 )
             else:
-                self.logger.info("No date filters set; fetching normally (all dates).")
+                logger.info("No date filters set; fetching normally (all dates).")
         except Exception:
             self.youtube = None
             idx = self._current_key_index + 1
-            self.logger.warning(
+            logger.warning(
                 f"Failed to initialize YouTube Data API client for key index {idx}."
             )
             # Try to switch to the next key immediately.
@@ -223,7 +224,7 @@ class ASMRFetcher:
         self._current_key_index += 1
         if self._current_key_index >= len(self.api_keys):
             self.youtube = None
-            self.logger.warning(
+            logger.warning(
                 "All YouTube Data API keys have been exhausted or failed. "
                 "Continuing without Data API for the rest of this run."
             )
@@ -240,18 +241,18 @@ class ASMRFetcher:
             self._channel_stats_quota_exceeded = False
             total_keys = len(self.api_keys)
             current = self._current_key_index + 1
-            self.logger.info(
+            logger.info(
                 f"Switched to YouTube Data API key {current}/{total_keys}."
             )
             if self.published_before or self.published_after:
-                self.logger.info(
+                logger.info(
                     f"Using date filter: published_after={self.published_after}, "
                     f"published_before={self.published_before}"
                 )
             return True
         except Exception:
             idx = self._current_key_index + 1
-            self.logger.warning(
+            logger.warning(
                 f"Failed to initialize YouTube Data API client for key index {idx}; trying next key."
             )
             # Try the next key recursively until we run out.
@@ -384,7 +385,7 @@ class ASMRFetcher:
             seconds = int(match.group(4) or 0)
             return (((days * 24) + hours) * 60 + minutes) * 60 + seconds
 
-        self.logger.warning("Could not parse duration string; using 0 seconds")
+        logger.warning("Could not parse duration string; using 0 seconds")
         return 0
 
     def _is_short_video(self, seconds: int) -> bool:
@@ -488,7 +489,7 @@ class ASMRFetcher:
 
         except Exception as exc:  # noqa: BLE001
             if "quotaExceeded" in str(exc):
-                self.logger.warning(
+                logger.warning(
                     "YouTube channel statistics quota exceeded for current key."
                 )
                 # Try next key if available
@@ -499,7 +500,7 @@ class ASMRFetcher:
                     self._channel_stats_cache[channel_id] = None
                     return None
 
-            self.logger.warning(
+            logger.warning(
                 "Failed to fetch channel statistics; channel_average_views will be None for this channel"
             )
             self._channel_stats_cache[channel_id] = None
@@ -518,14 +519,14 @@ class ASMRFetcher:
         try:
             yt = YouTube(url, "WEB")
         except pytube_exceptions.BotDetection:
-            self.logger.warning(
+            logger.warning(
                 "pytubefix BotDetection when constructing YouTube object; "
                 "disabling pytubefix for the rest of this run"
             )
             self._pytube_disabled = True
             return self._empty_video_metadata()
         except Exception:
-            self.logger.warning(
+            logger.warning(
                 "Failed to construct pytubefix YouTube object; using default metadata for this video"
             )
             return self._empty_video_metadata()
@@ -567,14 +568,14 @@ class ASMRFetcher:
             }
 
         except pytube_exceptions.BotDetection:
-            self.logger.warning(
+            logger.warning(
                 "pytubefix BotDetection when extracting metadata; "
                 "disabling pytubefix for the rest of this run"
             )
             self._pytube_disabled = True
             return self._empty_video_metadata()
         except Exception:
-            self.logger.warning(
+            logger.warning(
                 "Failed to extract pytubefix metadata; using default metadata for this video"
             )
             return self._empty_video_metadata()
@@ -671,18 +672,18 @@ class ASMRFetcher:
                 response = request.execute()
             except Exception as exc:  # noqa: BLE001
                 if "quotaExceeded" in str(exc):
-                    self.logger.warning(
+                    logger.warning(
                         "YouTube search quota exceeded for current key; attempting to switch API key."
                     )
                     if self._switch_to_next_api_key():
                         next_page_token = None
                         continue
                     else:
-                        self.logger.warning(
+                        logger.warning(
                             "No more API keys available; skipping further API search calls this run."
                         )
                         break
-                self.logger.warning(
+                logger.warning(
                     "YouTube Data API search failed; skipping further API search calls this run."
                 )
                 break
@@ -707,14 +708,14 @@ class ASMRFetcher:
                     ).execute()
                 except Exception as exc:  # noqa: BLE001
                     if "quotaExceeded" in str(exc):
-                        self.logger.warning(
+                        logger.warning(
                             "YouTube videos().list quota exceeded for current key; attempting to switch API key."
                         )
                         if self._switch_to_next_api_key():
                             # retry this video with new key by not marking it seen
                             continue
                         else:
-                            self.logger.warning(
+                            logger.warning(
                                 "No more API keys available; stopping API discovery this run."
                             )
                             break
@@ -777,7 +778,7 @@ class ASMRFetcher:
             if not next_page_token:
                 break
 
-        self.logger.info(
+        logger.info(
             f"[API] Found {len(new_items)} new non-short relevant videos before shuffling."
         )
         random.shuffle(new_items)
@@ -790,7 +791,7 @@ class ASMRFetcher:
                                         seen_ids_list: List[str]) -> List[Dict[str, Any]]:
         """Discover new relevant videos using pytubefix contrib Search."""
         if self._pytube_disabled:
-            self.logger.info(
+            logger.info(
                 "pytubefix has been disabled due to previous BotDetection; "
                 "skipping Search discovery."
             )
@@ -807,19 +808,19 @@ class ASMRFetcher:
         max_results = self.max_pages * self.results_per_page
         count = 0
 
-        self.logger.info("Starting pytubefix Search discovery...")
+        logger.info("Starting pytubefix Search discovery...")
 
         try:
             search_obj = Search(self.query, filters=filters)
         except pytube_exceptions.BotDetection:
-            self.logger.warning(
+            logger.warning(
                 "pytubefix BotDetection when initializing Search; "
                 "disabling pytubefix for the rest of this run"
             )
             self._pytube_disabled = True
             return []
         except Exception:
-            self.logger.warning(
+            logger.warning(
                 "Failed to initialize pytubefix Search; skipping Search discovery this run"
             )
             return []
@@ -844,14 +845,14 @@ class ASMRFetcher:
             try:
                 title = getattr(v, "title", "") or ""
             except pytube_exceptions.BotDetection:
-                self.logger.warning(
+                logger.warning(
                     f"pytubefix BotDetection when accessing title for video {video_id}; "
                     "disabling pytubefix Search for the rest of this run"
                 )
                 self._pytube_disabled = True
                 break
             except Exception:
-                self.logger.warning(
+                logger.warning(
                     f"Failed to get title from pytubefix search result; skipping video {video_id}"
                 )
                 title = ""
@@ -904,7 +905,7 @@ class ASMRFetcher:
                 }
             )
 
-        self.logger.info(
+        logger.info(
             f"[pytubefix Search] Found {len(new_items)} new non-short relevant videos before shuffling."
         )
         random.shuffle(new_items)
@@ -922,11 +923,11 @@ class ASMRFetcher:
             with open(self.json_output, "r", encoding="utf-8") as f:
                 data = json.load(f)
         except (json.JSONDecodeError, ValueError, TypeError):
-            self.logger.warning("Existing JSON could not be parsed; starting fresh")
+            logger.warning("Existing JSON could not be parsed; starting fresh")
             return {}
 
         if not isinstance(data, dict):
-            self.logger.warning("Existing JSON is not a dict; starting fresh")
+            logger.warning("Existing JSON is not a dict; starting fresh")
             return {}
 
         existing_by_id: Dict[str, Dict[str, Any]] = {}
@@ -969,7 +970,7 @@ class ASMRFetcher:
         pytube_items = self._discover_with_pytubefix_search(seen_ids_set, seen_ids_list)
         all_new_items.extend(pytube_items)
 
-        self.logger.info(
+        logger.info(
             f"Total new non-short relevant videos discovered this run: {len(all_new_items)}"
         )
 
@@ -991,7 +992,7 @@ class ASMRFetcher:
 
         final_keys = set(combined_by_id.keys())
         unique_new_ids = final_keys - existing_keys
-        self.logger.info(
+        logger.info(
             f"Ensuring metadata for {len(unique_new_ids)} newly added videos"
         )
 
@@ -1005,11 +1006,11 @@ class ASMRFetcher:
             for vid in seen_ids_list:
                 f.write(vid + "\n")
 
-        self.logger.info(
+        logger.info(
             f"Saved {len(unique_new_ids)} unique new entries to '{self.json_output}'. "
             f"Total entries stored: {len(combined_by_id)}"
         )
-        self.logger.info(
+        logger.info(
             f"Total unique videos tracked (seen list size): {len(seen_ids_list)}"
         )
 
@@ -1226,7 +1227,7 @@ if __name__ == "__main__":
             published_before=date_before_cfg,
             published_after=date_after_cfg,
         )
-        fetcher.logger.info(
+        logger.info(
             f"Running single range with published_after={date_after_cfg}, "
             f"published_before={date_before_cfg}"
         )
@@ -1259,7 +1260,7 @@ if __name__ == "__main__":
 
             # Loop until all date windows are processed.
             while True:
-                fetcher.logger.info(
+                logger.info(
                     f"Running window with published_after={fetcher.published_after}, "
                     f"published_before={fetcher.published_before}"
                 )
@@ -1269,7 +1270,7 @@ if __name__ == "__main__":
                 next_before, next_after, window_finished = _compute_date_bounds_with_window()
 
                 if window_finished:
-                    fetcher.logger.info(
+                    logger.info(
                         "Date windowing: configured range has now been fully processed. "
                         "Stopping further date windows for this run."
                     )
@@ -1278,7 +1279,7 @@ if __name__ == "__main__":
                 # Update fetcher to the next window.
                 fetcher.published_before = fetcher._normalize_published_bound(next_before)
                 fetcher.published_after = fetcher._normalize_published_bound(next_after)
-                fetcher.logger.info(
+                logger.info(
                     f"Updated date filter for next window: "
                     f"published_after={fetcher.published_after}, "
                     f"published_before={fetcher.published_before}"
