@@ -3,6 +3,7 @@ import common
 import pandas as pd
 from typing import Any, Dict, Optional, Set
 import os
+import re
 from collections import Counter
 
 from utils.tool import Tools  # for normalize_lemma_form, stopwords, etc.
@@ -14,6 +15,8 @@ logger = CustomLogger(__name__)
 tool_class = Tools()
 pre_process_class = Preprocessing()
 plots_class = Plots()
+
+LATIN_RE = re.compile(r"^[A-Za-z]+$")
 
 
 class Keyword_analysis():
@@ -89,6 +92,13 @@ class Keyword_analysis():
 
                 raw_lemma = token.lemma_.lower()
                 lemma = tool_class.normalize_lemma_form(raw_lemma)
+
+                # NEW: keep only Latin alphabetic lemmas
+                if not LATIN_RE.match(lemma):
+                    continue
+
+                if len(lemma) <= 1:
+                    continue
 
                 if lemma in extra_stopwords_lc:
                     continue

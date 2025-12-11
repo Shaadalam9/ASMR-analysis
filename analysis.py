@@ -1027,16 +1027,20 @@ def main() -> None:
     analysis_dir = os.path.join(common.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
 
-    # Existing raw-text wordcloud
-    run_wordcloud_pipeline(data, text_source=TEXT_SOURCE)
+    # Always generate wordclouds for title, description, and both
+    for src in ["title", "description", "both"]:
+        logger.info(f"Generating wordclouds for text_source='{src}'")
 
-    # verb-only lemma wordcloud (cached)
-    key_class.run_verb_lemma_wordcloud_pipeline(
-        data,
-        text_source=TEXT_SOURCE,
-        model_name="en_core_web_sm",
-        top_k=200,
-    )
+        # Raw-text wordcloud
+        run_wordcloud_pipeline(data, text_source=src)
+
+        # Verb-only lemma wordcloud (cached per text_source)
+        key_class.run_verb_lemma_wordcloud_pipeline(
+            data,
+            text_source=src,
+            model_name="en_core_web_sm",
+            top_k=200,
+        )
 
     keyword_pickle = os.path.join(
         analysis_dir,

@@ -151,14 +151,28 @@ The config file has the following parameters:
 
 ### Word clouds
 
+[![Word cloud of ASMR video titles](figures/wordcloud_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_title.html)  
+Word cloud generated from ASMR video **titles** only. Larger terms reflect words frequently used in video naming, revealing common framing strategies, thematic cues, and stylistic conventions.
+
+[![Word cloud of ASMR video descriptions](figures/wordcloud_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_description.html)  
+Word cloud derived from **descriptions** only. This highlights how creators contextualize their videos, promote content, and articulate use-cases such as sleep support, relaxation, or role-play scenarios.
 
 [![Word cloud of ASMR video titles and descriptions](figures/wordcloud_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_both.html)  
-Combined word cloud of ASMR video titles and descriptions, offering a holistic view of the most frequent terms across both fields. The visualization summarizes the overarching themes and stylistic patterns in the dataset.
-
-[![Word cloud of verb lemmas in ASMR titles and descriptions](figures/wordcloud_verbs_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_both.html)  
-Word cloud restricted to verb lemmas extracted from ASMR video titles and descriptions using spaCy. Each verb is counted at most once per video, highlighting common actions (e.g., whispering, tapping, driving) that characterize ASMR triggers and role-play interactions.
+Combined word cloud using **titles and descriptions together**, providing a holistic overview of the most frequent vocabulary across both fields and summarizing overarching themes in creator communication.
 
 ---
+
+### Verb-only word clouds (spaCy lemmas)
+
+[![Word cloud of verb lemmas in ASMR titles](figures/wordcloud_verbs_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_title.html)  
+Verb-only word cloud extracted from **titles**, where each verb lemma is counted at most once per video. This isolates action words used in ASMR titles (e.g., whisper, tap, brush, sleep).
+
+[![Word cloud of verb lemmas in ASMR descriptions](figures/wordcloud_verbs_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_description.html)  
+Verb-only word cloud extracted from **descriptions**. This highlights the actions described by creators when explaining their videos, such as brushing, guiding, helping, or tapping.
+
+[![Word cloud of verb lemmas in ASMR titles and descriptions](figures/wordcloud_verbs_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_both.html)  
+Verb-only cloud using **titles and descriptions combined**, emphasizing recurring ASMR actions across the entire dataset. This captures the behavioural and trigger-oriented vocabulary that defines ASMR production.
+
 
 ### Keyword frequencies (spaCy lemmas)
 
