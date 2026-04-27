@@ -97,6 +97,7 @@ import json
 import os
 import re
 import random
+import shutil
 import datetime
 import calendar
 from types import SimpleNamespace
@@ -912,23 +913,38 @@ class ASMRFetcher:
         return new_items
 
     # -------------------------------------------------------------------------
-    # Load existing JSON (new structure only)
+    # File load/save helpers
     # -------------------------------------------------------------------------
     def _load_existing_by_id(self) -> Dict[str, Dict[str, Any]]:
-        """Load existing videos from JSON file into a dict keyed by videoId."""
+        """Load existing videos from JSON file into a dict keyed by videoId.
+
+        Important safety rule:
+            If the JSON file exists but cannot be parsed, do NOT return an empty
+            dict. Returning an empty dict would make the next save overwrite a
+            previously large JSON with only the videos found in the current run.
+        """
         if not os.path.exists(self.json_output):
             return {}
 
         try:
             with open(self.json_output, "r", encoding="utf-8") as f:
                 data = json.load(f)
-        except (json.JSONDecodeError, ValueError, TypeError):
-            logger.warning("Existing JSON could not be parsed; starting fresh")
-            return {}
+        except (json.JSONDecodeError, ValueError, TypeError) as exc:
+            message = (
+                f"Existing JSON '{self.json_output}' could not be parsed. "
+                "Refusing to continue so the file is not overwritten with a smaller dataset. "
+                "Fix the JSON or restore from the .bak backup, then run again."
+            )
+            logger.warning(message)
+            raise RuntimeError(message) from exc
 
         if not isinstance(data, dict):
-            logger.warning("Existing JSON is not a dict; starting fresh")
-            return {}
+            message = (
+                f"Existing JSON '{self.json_output}' is not a dict. "
+                "Refusing to continue so the file is not overwritten with a smaller dataset."
+            )
+            logger.warning(message)
+            raise RuntimeError(message)
 
         existing_by_id: Dict[str, Dict[str, Any]] = {}
         for vid, meta in data.items():
@@ -938,28 +954,103 @@ class ASMRFetcher:
 
         return existing_by_id
 
+    def _load_seen_ids_ordered(self) -> List[str]:
+        """Load seen video IDs in stable order, removing duplicate lines."""
+        seen_ids_list: List[str] = []
+        seen_ids_set: set[str] = set()
+
+        if not os.path.exists(self.seen_file):
+            return seen_ids_list
+
+        with open(self.seen_file, "r", encoding="utf-8") as f:
+            for line in f:
+                vid = line.strip()
+                if vid and vid not in seen_ids_set:
+                    seen_ids_list.append(vid)
+                    seen_ids_set.add(vid)
+
+        return seen_ids_list
+
+    def _write_json_atomic(self, data: Dict[str, Dict[str, Any]]) -> None:
+        """Safely write JSON using a temp file, fsync, backup, and atomic replace."""
+        output_dir = os.path.dirname(self.json_output) or "."
+        os.makedirs(output_dir, exist_ok=True)
+
+        tmp_path = f"{self.json_output}.tmp.{os.getpid()}"
+        backup_path = f"{self.json_output}.bak"
+
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=4, ensure_ascii=False)
+                f.flush()
+                os.fsync(f.fileno())
+
+            # Keep one backup of the last good JSON before replacing it.
+            if os.path.exists(self.json_output):
+                shutil.copy2(self.json_output, backup_path)
+
+            os.replace(tmp_path, self.json_output)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
+
+    def _write_seen_ids_atomic(self, seen_ids_list: List[str]) -> None:
+        """Safely write seen video IDs using a temp file and atomic replace."""
+        output_dir = os.path.dirname(self.seen_file) or "."
+        os.makedirs(output_dir, exist_ok=True)
+
+        tmp_path = f"{self.seen_file}.tmp.{os.getpid()}"
+        try:
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                for vid in seen_ids_list:
+                    f.write(vid + "\n")
+                f.flush()
+                os.fsync(f.fileno())
+
+            os.replace(tmp_path, self.seen_file)
+        except Exception:
+            if os.path.exists(tmp_path):
+                try:
+                    os.remove(tmp_path)
+                except Exception:
+                    pass
+            raise
+
     # -------------------------------------------------------------------------
     # Main public method
     # -------------------------------------------------------------------------
     def fetch_asmr_videos(self) -> List[str]:
         """Discover and enrich videos, then persist them to JSON."""
         existing_by_id = self._load_existing_by_id()
-        existing_keys = set(existing_by_id.keys())
+        original_json_keys = set(existing_by_id.keys())
 
-        seen_ids_list: List[str] = []
-        seen_ids_set: set[str] = set(existing_keys)
+        seen_ids_list = self._load_seen_ids_ordered()
+        seen_ids_set_for_order = set(seen_ids_list)
 
-        if os.path.exists(self.seen_file):
-            with open(self.seen_file, "r", encoding="utf-8") as f:
-                for line in f:
-                    vid = line.strip()
-                    if vid and vid not in seen_ids_set:
-                        seen_ids_list.append(vid)
-                        seen_ids_set.add(vid)
+        # If the text file contains IDs that are missing from JSON, do not let
+        # those IDs remain invisible. Add placeholder JSON entries so a later
+        # save cannot keep the JSON count far below the seen-list count.
+        seen_only_ids = [vid for vid in seen_ids_list if vid not in existing_by_id]
+        if seen_only_ids:
+            logger.warning(
+                f"Found {len(seen_only_ids)} IDs in '{self.seen_file}' that are missing "
+                f"from '{self.json_output}'. Adding placeholder JSON entries and attempting metadata recovery."
+            )
+            for vid in seen_only_ids:
+                existing_by_id[vid] = self._empty_video_metadata()
 
-        for vid in existing_keys:
-            if vid not in seen_ids_list:
+        # Make sure every JSON key is also tracked in the seen file.
+        for vid in existing_by_id.keys():
+            if vid not in seen_ids_set_for_order:
                 seen_ids_list.append(vid)
+                seen_ids_set_for_order.add(vid)
+
+        existing_keys = set(existing_by_id.keys())
+        seen_ids_set: set[str] = set(existing_keys)
 
         all_new_items: List[Dict[str, Any]] = []
 
@@ -991,23 +1082,34 @@ class ASMRFetcher:
             combined_by_id[vid] = meta
 
         final_keys = set(combined_by_id.keys())
-        unique_new_ids = final_keys - existing_keys
+        unique_new_ids = final_keys - original_json_keys
         logger.info(
-            f"Ensuring metadata for {len(unique_new_ids)} newly added videos"
+            f"Ensuring metadata for {len(unique_new_ids)} newly added or recovered videos"
         )
 
         for vid in unique_new_ids:
             self._ensure_metadata_for_item(vid, combined_by_id[vid])
 
-        with open(self.json_output, "w", encoding="utf-8") as f:
-            json.dump(combined_by_id, f, indent=4, ensure_ascii=False)
+        # Safety guard: this fetcher should only preserve or grow the JSON.
+        # If the new result is smaller than what we loaded, something is wrong;
+        # refuse to overwrite the existing file.
+        if len(combined_by_id) < len(original_json_keys):
+            raise RuntimeError(
+                f"Refusing to save because JSON would shrink from "
+                f"{len(original_json_keys)} to {len(combined_by_id)} entries."
+            )
 
-        with open(self.seen_file, "w", encoding="utf-8") as f:
-            for vid in seen_ids_list:
-                f.write(vid + "\n")
+        if len(combined_by_id) < len(set(seen_ids_list)):
+            raise RuntimeError(
+                f"Refusing to save because JSON would contain {len(combined_by_id)} entries "
+                f"but the seen file tracks {len(set(seen_ids_list))} unique IDs."
+            )
+
+        self._write_json_atomic(combined_by_id)
+        self._write_seen_ids_atomic(seen_ids_list)
 
         logger.info(
-            f"Saved {len(unique_new_ids)} unique new entries to '{self.json_output}'. "
+            f"Saved {len(unique_new_ids)} unique new/recovered entries to '{self.json_output}'. "
             f"Total entries stored: {len(combined_by_id)}"
         )
         logger.info(

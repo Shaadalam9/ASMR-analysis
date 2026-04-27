@@ -50,7 +50,7 @@ class JSONMetadataEnricher:
 
         # NEW: path to the seen_videos_id.txt file (same folder as JSON)
         self.seen_videos_path = os.path.join(
-            os.path.dirname(self.json_path), "seen_videos_id.txt"
+            os.path.dirname(self.json_path), "seen_videos_ids.txt"
         )
 
         # Initialize logging.
