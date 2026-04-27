@@ -5,18 +5,17 @@ This script is separate from main.py. It reads video IDs from one or more
 seen*.txt files, compares them with the existing JSON, fetches missing metadata,
 and writes the recovered data back to the original JSON file safely.
 
-Default behaviour:
-    * Input JSON:  <data folder>/asmr_results.json
-    * Output JSON: same file as input, <data folder>/asmr_results.json
-    * Seen files: every .txt file in the data folder whose name contains
-      both "seen" and "video", plus the two known names:
-          - seen_video_ids.txt
-          - seen_videos_id.txt
+Important behaviour:
+    * Input/output JSON: <data folder>/asmr_results.json
     * Existing JSON entries are kept.
     * Missing JSON entries are recovered from the YouTube Data API first.
-    * pytubefix is used as a fallback for IDs not returned by the API.
-    * The JSON is written atomically.
-    * The existing JSON is backed up before replacement.
+    * pytubefix is used only as a fallback.
+    * If a missing ID is confidently private, deleted, or unavailable, it is
+      removed from the seen text files instead of being added as an empty JSON
+      entry.
+    * YouTube Data API quota exhaustion never causes IDs to be removed.
+    * pytubefix HTTP 429 never causes IDs to be removed.
+    * The JSON is written atomically and the previous JSON is backed up first.
 """
 
 from __future__ import annotations
@@ -45,12 +44,11 @@ DetectorFactory.seed = 0
 # User editable settings
 # -----------------------------------------------------------------------------
 JSON_FILENAME = "asmr_results.json"
-RECOVERED_JSON_FILENAME = "asmr_results_recovered.json"
 
-# Write back to the original JSON file. A timestamped backup is created first.
+# Write directly back to asmr_results.json. A timestamped backup is created first.
 WRITE_IN_PLACE = True
 
-# Recover missing JSON entries from text IDs.
+# Recover IDs that are present in seen text files but missing from JSON.
 RECOVER_IDS_MISSING_FROM_JSON = True
 
 # Also fill missing fields in entries that already exist in JSON.
@@ -60,19 +58,24 @@ FILL_MISSING_FIELDS_IN_EXISTING_JSON = True
 # likes are only filled when missing.
 REFRESH_EXISTING_VIEWS_LIKES = False
 
-# If a video is private, deleted, or not returned by either API or pytubefix,
-# add a placeholder entry so the JSON still accounts for that seen ID.
-ADD_PLACEHOLDER_FOR_UNAVAILABLE_IDS = True
+# Your requested behaviour: if a missing ID is confirmed private/deleted/removed,
+# remove it from the seen text files instead of creating an empty JSON entry.
+REMOVE_CONFIRMED_UNAVAILABLE_IDS_FROM_SEEN_TXT = True
+ADD_PLACEHOLDER_FOR_UNAVAILABLE_IDS = False
 
 # YouTube Data API accepts up to 50 video IDs per videos().list call.
 VIDEO_BATCH_SIZE = 50
 CHANNEL_BATCH_SIZE = 50
 
-# Write a checkpoint every N video batches, useful for very large recoveries.
+# Save a checkpoint beside the JSON every N video batches.
 CHECKPOINT_EVERY_N_BATCHES = 10
 
-# Polite pause between batches. Keep at 0 unless you want to slow the script down.
+# Optional pause between API batches.
 SLEEP_SECONDS_BETWEEN_BATCHES = 0.0
+
+# Stop using pytubefix after the first HTTP 429. This avoids repeated web
+# scraping requests and prevents 429 from being mistaken for private/deleted.
+DISABLE_PYTUBEFIX_AFTER_HTTP_429 = True
 
 
 # -----------------------------------------------------------------------------
@@ -144,7 +147,6 @@ def _detect_language(text: str) -> Optional[str]:
 
 
 def _duration_to_seconds(iso_duration: Optional[str]) -> Optional[int]:
-    """Convert an ISO 8601 YouTube duration string to total seconds."""
     if not iso_duration:
         return None
     if iso_duration == "P0D":
@@ -199,6 +201,26 @@ def _empty_metadata(status: str = "placeholder") -> Dict[str, Any]:
     }
 
 
+def _is_rate_limit_error(exc: Exception) -> bool:
+    message = str(exc)
+    return "429" in message or "Too Many Requests" in message
+
+
+def _looks_unavailable_error(exc: Exception) -> bool:
+    message = str(exc)
+    tokens = [
+        "VideoUnavailable",
+        "This video is unavailable",
+        "This video is private",
+        "This video has been removed",
+        "Video has been removed",
+        "Private video",
+        "not available",
+        "404",
+    ]
+    return any(token in message for token in tokens)
+
+
 def _merge_metadata(
     target: Dict[str, Any],
     incoming: Dict[str, Any],
@@ -206,16 +228,10 @@ def _merge_metadata(
     overwrite_views_likes: bool = False,
     overwrite_all: bool = False,
 ) -> bool:
-    """Merge incoming metadata into target.
-
-    Returns True when target was changed.
-    """
     changed = False
 
     for key, value in incoming.items():
-        if key == "videoId":
-            continue
-        if value is None:
+        if key == "videoId" or value is None:
             continue
 
         zero_missing = key in {"duration"}
@@ -246,37 +262,30 @@ def _merge_metadata(
 # File helpers
 # -----------------------------------------------------------------------------
 def _extract_video_ids_from_line(line: str) -> List[str]:
-    """Extract one or more YouTube video IDs from a line.
-
-    Supports plain IDs and common YouTube URLs.
-    """
     line = line.strip()
     if not line:
         return []
 
     ids: List[str] = []
-
-    # Common URL forms.
-    for pattern in [
+    patterns = [
         r"(?:v=)([0-9A-Za-z_-]{11})",
         r"(?:youtu\.be/)([0-9A-Za-z_-]{11})",
         r"(?:shorts/)([0-9A-Za-z_-]{11})",
         r"(?:embed/)([0-9A-Za-z_-]{11})",
-    ]:
+    ]
+    for pattern in patterns:
         ids.extend(re.findall(pattern, line))
 
-    # Plain ID or ID embedded in whitespace separated text.
     if not ids:
         ids.extend(re.findall(r"(?<![0-9A-Za-z_-])([0-9A-Za-z_-]{11})(?![0-9A-Za-z_-])", line))
 
-    # Preserve order and remove duplicates from the line.
+    unique: List[str] = []
     seen = set()
-    out = []
     for video_id in ids:
         if video_id not in seen:
             seen.add(video_id)
-            out.append(video_id)
-    return out
+            unique.append(video_id)
+    return unique
 
 
 def _discover_seen_files(folder: str) -> List[str]:
@@ -334,6 +343,73 @@ def _load_seen_ids(folder: str) -> List[str]:
     return ordered
 
 
+def _remove_ids_from_seen_files(folder: str, ids_to_remove: Sequence[str]) -> int:
+    remove_set = set(ids_to_remove)
+    if not remove_set:
+        return 0
+
+    total_removed = 0
+    for path in _discover_seen_files(folder):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                lines = f.readlines()
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Could not read '{}' for cleanup: {}".format(path, exc))
+            continue
+
+        changed = False
+        new_lines: List[str] = []
+        removed_from_file = 0
+
+        for line in lines:
+            ids_in_line = _extract_video_ids_from_line(line)
+            if not ids_in_line:
+                new_lines.append(line)
+                continue
+
+            ids_removed = [video_id for video_id in ids_in_line if video_id in remove_set]
+            if not ids_removed:
+                new_lines.append(line)
+                continue
+
+            changed = True
+            removed_from_file += len(ids_removed)
+            ids_to_keep = [video_id for video_id in ids_in_line if video_id not in remove_set]
+
+            # Usually there is one ID per line. If a line has multiple IDs, keep
+            # the remaining valid IDs one per line rather than deleting them.
+            for video_id in ids_to_keep:
+                new_lines.append(video_id + "\n")
+
+        if not changed:
+            continue
+
+        backup_path = path + ".bak_removed_" + _now_stamp()
+        tmp_path = path + ".tmp_" + _now_stamp()
+        try:
+            shutil.copy2(path, backup_path)
+            with open(tmp_path, "w", encoding="utf-8") as f:
+                f.writelines(new_lines)
+            os.replace(tmp_path, path)
+            total_removed += removed_from_file
+            logger.info(
+                "Removed {} confirmed unavailable ID occurrence(s) from '{}'. Backup: '{}'".format(
+                    removed_from_file,
+                    path,
+                    backup_path,
+                )
+            )
+        except Exception as exc:  # noqa: BLE001
+            logger.warning("Failed to update seen file '{}': {}".format(path, exc))
+            try:
+                if os.path.exists(tmp_path):
+                    os.remove(tmp_path)
+            except Exception:
+                pass
+
+    return total_removed
+
+
 def _load_json(path: str) -> Dict[str, Dict[str, Any]]:
     if not os.path.exists(path):
         logger.warning("Input JSON '{}' does not exist. Starting from empty JSON.".format(path))
@@ -343,17 +419,15 @@ def _load_json(path: str) -> Dict[str, Dict[str, Any]]:
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
     except Exception as exc:  # noqa: BLE001
-        logger.warning(
-            "Could not parse '{}': {}. Starting from empty JSON for recovery output only.".format(
+        raise RuntimeError(
+            "Could not parse '{}': {}. Refusing to overwrite the original JSON.".format(
                 path,
                 exc,
             )
         )
-        return {}
 
     if not isinstance(data, dict):
-        logger.warning("Input JSON '{}' is not a dict. Starting from empty JSON.".format(path))
-        return {}
+        raise RuntimeError("Input JSON '{}' is not a dict. Refusing to overwrite it.".format(path))
 
     cleaned: Dict[str, Dict[str, Any]] = {}
     for video_id, meta in data.items():
@@ -373,7 +447,7 @@ def _atomic_save_json(path: str, data: Dict[str, Dict[str, Any]]) -> None:
     if os.path.exists(path):
         backup_path = path + ".bak_" + _now_stamp()
         shutil.copy2(path, backup_path)
-        logger.info("Backed up existing output to '{}'.".format(backup_path))
+        logger.info("Backed up existing JSON to '{}'.".format(backup_path))
 
     tmp_path = path + ".tmp_" + _now_stamp()
     with open(tmp_path, "w", encoding="utf-8") as f:
@@ -393,7 +467,7 @@ def _save_checkpoint(path: str, data: Dict[str, Dict[str, Any]]) -> None:
 
 
 # -----------------------------------------------------------------------------
-# Secret and API helpers
+# Secrets and API helpers
 # -----------------------------------------------------------------------------
 def _load_api_keys_from_secrets() -> List[str]:
     raw = common.get_secrets("google-api-keys") or common.get_secrets("google-api-key")
@@ -415,23 +489,23 @@ def _load_api_keys_from_secrets() -> List[str]:
         if s:
             keys.append(s)
 
-    # Remove duplicate keys while preserving order.
-    out: List[str] = []
+    deduped: List[str] = []
     seen = set()
     for key in keys:
         if key not in seen:
             seen.add(key)
-            out.append(key)
-    return out
+            deduped.append(key)
+    return deduped
 
 
 class YouTubeAPIClient:
-    """Small wrapper with API key rotation."""
+    """Small wrapper around the YouTube Data API with key rotation."""
 
     def __init__(self, api_keys: Sequence[str]) -> None:
         self.api_keys = [key for key in api_keys if key]
         self.index = 0
         self.youtube = None
+        self.quota_exhausted = False
         self._init_current_key()
 
     def _init_current_key(self) -> None:
@@ -468,27 +542,37 @@ class YouTubeAPIClient:
         self.index += 1
         if self.index >= len(self.api_keys):
             self.youtube = None
+            self.quota_exhausted = True
             logger.warning("All YouTube Data API keys exhausted or failed.")
             return False
         self._init_current_key()
         return self.youtube is not None
 
-    def execute(self, request_factory, context: str) -> Optional[Dict[str, Any]]:
-        """Execute a YouTube API request, rotating on quotaExceeded."""
+    def execute(self, request_factory, context: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Execute a YouTube API request.
+
+        Returns:
+            (response, status)
+            status is one of: success, quota, error, no_client
+        """
+        if self.youtube is None:
+            return None, "no_client"
+
         while self.youtube is not None:
             try:
-                return request_factory(self.youtube).execute()
+                return request_factory(self.youtube).execute(), "success"
             except Exception as exc:  # noqa: BLE001
                 message = str(exc)
                 if "quotaExceeded" in message or "dailyLimitExceeded" in message:
                     logger.warning("Quota exceeded during {}; switching API key.".format(context))
                     if self._switch_key():
                         continue
-                    return None
+                    return None, "quota"
 
                 logger.warning("YouTube API request failed during {}: {}".format(context, exc))
-                return None
-        return None
+                return None, "error"
+
+        return None, "quota" if self.quota_exhausted else "no_client"
 
 
 # -----------------------------------------------------------------------------
@@ -525,11 +609,19 @@ def _metadata_from_api_item(item: Dict[str, Any]) -> Dict[str, Any]:
 def _fetch_video_metadata_api(
     api_client: YouTubeAPIClient,
     video_ids: Sequence[str],
-) -> Dict[str, Dict[str, Any]]:
-    if api_client.youtube is None or not video_ids:
-        return {}
+) -> Tuple[Dict[str, Dict[str, Any]], List[str], str]:
+    """Fetch video metadata from the YouTube Data API.
 
-    response = api_client.execute(
+    Returns:
+        (recovered_by_id, confirmed_unavailable_ids, status)
+
+    confirmed_unavailable_ids is only populated when the API request succeeds.
+    It remains empty on quota exhaustion or transient API errors.
+    """
+    if api_client.youtube is None or not video_ids:
+        return {}, [], "no_client"
+
+    response, status = api_client.execute(
         lambda youtube: youtube.videos().list(
             part="snippet,contentDetails,statistics",
             id=",".join(video_ids),
@@ -537,15 +629,17 @@ def _fetch_video_metadata_api(
         ),
         context="videos().list",
     )
-    if not response:
-        return {}
+    if response is None or status != "success":
+        return {}, [], status
 
     recovered: Dict[str, Dict[str, Any]] = {}
     for item in response.get("items", []):
         video_id = item.get("id")
         if video_id:
             recovered[str(video_id)] = _metadata_from_api_item(item)
-    return recovered
+
+    confirmed_unavailable = [video_id for video_id in video_ids if video_id not in recovered]
+    return recovered, confirmed_unavailable, "success"
 
 
 def _fetch_channel_average_views_api(
@@ -555,7 +649,7 @@ def _fetch_channel_average_views_api(
     if api_client.youtube is None or not channel_ids:
         return {}
 
-    response = api_client.execute(
+    response, status = api_client.execute(
         lambda youtube: youtube.channels().list(
             part="statistics",
             id=",".join(channel_ids),
@@ -563,7 +657,7 @@ def _fetch_channel_average_views_api(
         ),
         context="channels().list",
     )
-    if not response:
+    if response is None or status != "success":
         return {}
 
     result: Dict[str, Optional[float]] = {}
@@ -583,71 +677,99 @@ def _fetch_channel_average_views_api(
     return result
 
 
-def _fetch_video_metadata_pytubefix(video_id: str) -> Tuple[Optional[Dict[str, Any]], bool]:
-    """Fetch metadata with pytubefix.
+class PytubefixFallback:
+    def __init__(self) -> None:
+        self.disabled_by_429 = False
+        self.logged_disabled = False
 
-    Returns:
-        (metadata, unavailable)
-    """
-    url = "https://www.youtube.com/watch?v={}".format(video_id)
+    def fetch(self, video_id: str) -> Tuple[Optional[Dict[str, Any]], str]:
+        """Fetch metadata with pytubefix.
 
-    try:
-        try:
-            yt = YouTube(url, "WEB")
-        except TypeError:
-            yt = YouTube(url)
-    except pytube_exceptions.BotDetection:
-        logger.warning("pytubefix bot detection hit for video {}.".format(video_id))
-        return None, False
-    except Exception as exc:  # noqa: BLE001
-        message = str(exc)
-        unavailable = any(
-            token in message
-            for token in [
-                "VideoUnavailable",
-                "This video is unavailable",
-                "This video is private",
-                "This video has been removed",
-                "404",
-            ]
-        )
-        return None, unavailable
+        Returns:
+            (metadata, status)
+            status is one of: success, unavailable, rate_limited, bot_detection, error, disabled
+        """
+        if self.disabled_by_429:
+            if not self.logged_disabled:
+                logger.warning("pytubefix fallback is disabled for this run after HTTP 429.")
+                self.logged_disabled = True
+            return None, "disabled"
 
-    try:
-        title = getattr(yt, "title", None)
-        description = getattr(yt, "description", None)
-        publish_raw = getattr(yt, "publish_date", None)
-        channel_id = getattr(yt, "channel_id", None)
-        author = getattr(yt, "author", None)
-        views = _normalise_int(getattr(yt, "views", None))
-        likes = _normalise_int(getattr(yt, "likes", None))
+        url = "https://www.youtube.com/watch?v={}".format(video_id)
 
         try:
-            duration = _normalise_int(getattr(yt, "length", None))
-        except Exception:
-            duration = None
+            try:
+                yt = YouTube(url, "WEB")
+            except TypeError:
+                yt = YouTube(url)
+        except pytube_exceptions.BotDetection:
+            logger.warning("pytubefix bot detection hit for video {}. Keeping ID in seen files.".format(video_id))
+            return None, "bot_detection"
+        except Exception as exc:  # noqa: BLE001
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "pytubefix HTTP 429 for {}: {}. Keeping IDs in seen files.".format(
+                        video_id,
+                        exc,
+                    )
+                )
+                if DISABLE_PYTUBEFIX_AFTER_HTTP_429:
+                    self.disabled_by_429 = True
+                    logger.warning("Disabling pytubefix fallback for the rest of this run due to HTTP 429.")
+                return None, "rate_limited"
+            if _looks_unavailable_error(exc):
+                return None, "unavailable"
+            logger.warning("pytubefix failed for {}: {}. Keeping ID in seen files.".format(video_id, exc))
+            return None, "error"
 
-        language = _detect_language("{} {}".format(title or "", description or ""))
+        try:
+            title = getattr(yt, "title", None)
+            description = getattr(yt, "description", None)
+            publish_raw = getattr(yt, "publish_date", None)
+            channel_id = getattr(yt, "channel_id", None)
+            author = getattr(yt, "author", None)
+            views = _normalise_int(getattr(yt, "views", None))
+            likes = _normalise_int(getattr(yt, "likes", None))
 
-        return {
-            "title": title,
-            "duration": duration,
-            "channelId": channel_id,
-            "author": author,
-            "views": views,
-            "likes": likes,
-            "description": description,
-            "uploadDate": _normalise_upload_date(publish_raw),
-            "language": language,
-            "channel_average_views": None,
-            "recovery_status": "recovered_from_pytubefix",
-        }, False
-    except pytube_exceptions.BotDetection:
-        logger.warning("pytubefix bot detection while reading video {}.".format(video_id))
-        return None, False
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("pytubefix metadata extraction failed for {}: {}".format(video_id, exc))
-        return None, False
+            try:
+                duration = _normalise_int(getattr(yt, "length", None))
+            except Exception:
+                duration = None
+
+            language = _detect_language("{} {}".format(title or "", description or ""))
+
+            return {
+                "title": title,
+                "duration": duration,
+                "channelId": channel_id,
+                "author": author,
+                "views": views,
+                "likes": likes,
+                "description": description,
+                "uploadDate": _normalise_upload_date(publish_raw),
+                "language": language,
+                "channel_average_views": None,
+                "recovery_status": "recovered_from_pytubefix",
+            }, "success"
+        except pytube_exceptions.BotDetection:
+            logger.warning("pytubefix bot detection while reading video {}. Keeping ID in seen files.".format(video_id))
+            return None, "bot_detection"
+        except Exception as exc:  # noqa: BLE001
+            if _is_rate_limit_error(exc):
+                logger.warning(
+                    "pytubefix metadata extraction HTTP 429 for {}: {}. Keeping IDs in seen files.".format(
+                        video_id,
+                        exc,
+                    )
+                )
+                if DISABLE_PYTUBEFIX_AFTER_HTTP_429:
+                    self.disabled_by_429 = True
+                    logger.warning("Disabling pytubefix fallback for the rest of this run due to HTTP 429.")
+                return None, "rate_limited"
+            if _looks_unavailable_error(exc):
+                return None, "unavailable"
+            logger.warning("pytubefix metadata extraction failed for {}: {}. Keeping ID in seen files.".format(video_id, exc))
+            return None, "error"
 
 
 # -----------------------------------------------------------------------------
@@ -676,6 +798,10 @@ def _apply_channel_average_views(
     data: Dict[str, Dict[str, Any]],
     api_client: YouTubeAPIClient,
 ) -> None:
+    if api_client.youtube is None:
+        logger.info("Skipping channel_average_views because no YouTube Data API client is available.")
+        return
+
     channel_ids: List[str] = []
     seen = set()
 
@@ -699,6 +825,9 @@ def _apply_channel_average_views(
     for batch in _batched(channel_ids, CHANNEL_BATCH_SIZE):
         averages = _fetch_channel_average_views_api(api_client, batch)
         if not averages:
+            if api_client.quota_exhausted:
+                logger.warning("Stopping channel_average_views recovery because API quota is exhausted.")
+                break
             continue
 
         for meta in data.values():
@@ -713,18 +842,19 @@ def _apply_channel_average_views(
 
 def recover_json_from_seen_ids() -> None:
     folder = _data_folder()
-    input_json_path = os.path.join(folder, JSON_FILENAME)
-    output_json_path = input_json_path if WRITE_IN_PLACE else os.path.join(folder, RECOVERED_JSON_FILENAME)
+    json_path = os.path.join(folder, JSON_FILENAME)
+    output_json_path = json_path
 
     api_keys = _load_api_keys_from_secrets()
     api_client = YouTubeAPIClient(api_keys)
+    pytube = PytubefixFallback()
 
     seen_ids = _load_seen_ids(folder)
     if not seen_ids:
         logger.warning("No seen IDs found. Nothing to recover.")
         return
 
-    data = _load_json(input_json_path)
+    data = _load_json(json_path)
     original_json_count = len(data)
 
     ids_missing_from_json = [video_id for video_id in seen_ids if video_id not in data]
@@ -737,6 +867,7 @@ def recover_json_from_seen_ids() -> None:
     if not RECOVER_IDS_MISSING_FROM_JSON:
         ids_missing_from_json = []
 
+    ids_missing_from_json_set = set(ids_missing_from_json)
     ids_to_recover = ids_missing_from_json + ids_existing_but_incomplete
 
     logger.info("Existing JSON entries: {}".format(original_json_count))
@@ -744,19 +875,21 @@ def recover_json_from_seen_ids() -> None:
     logger.info("Existing JSON entries with missing fields: {}".format(len(ids_existing_but_incomplete)))
     logger.info("Total IDs selected for recovery: {}".format(len(ids_to_recover)))
 
-    if not ids_to_recover:
-        logger.info("No video metadata recovery needed. Will still try channel averages if needed.")
-
     api_recovered_count = 0
     pytube_recovered_count = 0
     placeholder_count = 0
+    api_confirmed_unavailable_count = 0
+    pytube_confirmed_unavailable_count = 0
+
+    confirmed_unavailable_to_remove: List[str] = []
+    confirmed_unavailable_seen = set()
 
     total_batches = (len(ids_to_recover) + VIDEO_BATCH_SIZE - 1) // VIDEO_BATCH_SIZE
 
     for batch_index, batch in enumerate(_batched(ids_to_recover, VIDEO_BATCH_SIZE), start=1):
         logger.info("Processing video batch {}/{} ({} IDs).".format(batch_index, total_batches, len(batch)))
 
-        recovered_by_api = _fetch_video_metadata_api(api_client, batch)
+        recovered_by_api, unavailable_by_api, api_status = _fetch_video_metadata_api(api_client, batch)
         api_recovered_count += len(recovered_by_api)
 
         for video_id, metadata in recovered_by_api.items():
@@ -768,10 +901,26 @@ def recover_json_from_seen_ids() -> None:
                 overwrite_views_likes=REFRESH_EXISTING_VIEWS_LIKES,
             )
 
+        unavailable_by_api_set = set(unavailable_by_api)
         not_recovered_by_api = [video_id for video_id in batch if video_id not in recovered_by_api]
 
         for video_id in not_recovered_by_api:
-            metadata, unavailable = _fetch_video_metadata_pytubefix(video_id)
+            # Only remove if the API request succeeded and omitted the ID.
+            # Do not remove anything when quota is exhausted.
+            if (
+                api_status == "success"
+                and not api_client.quota_exhausted
+                and video_id in unavailable_by_api_set
+                and video_id in ids_missing_from_json_set
+                and REMOVE_CONFIRMED_UNAVAILABLE_IDS_FROM_SEEN_TXT
+            ):
+                if video_id not in confirmed_unavailable_seen:
+                    confirmed_unavailable_seen.add(video_id)
+                    confirmed_unavailable_to_remove.append(video_id)
+                    api_confirmed_unavailable_count += 1
+                continue
+
+            metadata, pytube_status = pytube.fetch(video_id)
             if metadata is not None:
                 if video_id not in data:
                     data[video_id] = _empty_metadata(status="created_before_pytube_merge")
@@ -781,9 +930,24 @@ def recover_json_from_seen_ids() -> None:
                     overwrite_views_likes=REFRESH_EXISTING_VIEWS_LIKES,
                 )
                 pytube_recovered_count += 1
-            elif video_id not in data and ADD_PLACEHOLDER_FOR_UNAVAILABLE_IDS:
-                status = "unavailable_or_private" if unavailable else "not_recovered"
-                data[video_id] = _empty_metadata(status=status)
+                continue
+
+            # pytubefix unavailable is used for text cleanup only when API quota
+            # has not been exhausted. HTTP 429/rate limits never remove IDs.
+            if (
+                pytube_status == "unavailable"
+                and not api_client.quota_exhausted
+                and video_id in ids_missing_from_json_set
+                and REMOVE_CONFIRMED_UNAVAILABLE_IDS_FROM_SEEN_TXT
+            ):
+                if video_id not in confirmed_unavailable_seen:
+                    confirmed_unavailable_seen.add(video_id)
+                    confirmed_unavailable_to_remove.append(video_id)
+                    pytube_confirmed_unavailable_count += 1
+                continue
+
+            if video_id not in data and ADD_PLACEHOLDER_FOR_UNAVAILABLE_IDS:
+                data[video_id] = _empty_metadata(status="not_recovered")
                 placeholder_count += 1
 
         if CHECKPOINT_EVERY_N_BATCHES > 0 and batch_index % CHECKPOINT_EVERY_N_BATCHES == 0:
@@ -794,22 +958,33 @@ def recover_json_from_seen_ids() -> None:
 
     _apply_channel_average_views(data, api_client)
 
-    # Make sure every seen ID has an entry when placeholders are enabled.
     if ADD_PLACEHOLDER_FOR_UNAVAILABLE_IDS:
         for video_id in seen_ids:
-            if video_id not in data:
+            if video_id not in data and video_id not in confirmed_unavailable_seen:
                 data[video_id] = _empty_metadata(status="not_recovered_after_full_run")
                 placeholder_count += 1
+
+    removed_from_seen_files = 0
+    if api_client.quota_exhausted:
+        logger.warning(
+            "YouTube Data API quota was exhausted during this run. "
+            "Skipping all removals from seen text files for safety."
+        )
+    elif REMOVE_CONFIRMED_UNAVAILABLE_IDS_FROM_SEEN_TXT and confirmed_unavailable_to_remove:
+        removed_from_seen_files = _remove_ids_from_seen_files(folder, confirmed_unavailable_to_remove)
 
     _atomic_save_json(output_json_path, data)
 
     logger.info("Recovery summary:")
-    logger.info("  Seen IDs: {}".format(len(seen_ids)))
+    logger.info("  Seen IDs loaded from text files: {}".format(len(seen_ids)))
     logger.info("  Original JSON entries: {}".format(original_json_count))
     logger.info("  Final JSON entries: {}".format(len(data)))
     logger.info("  Recovered via API: {}".format(api_recovered_count))
     logger.info("  Recovered via pytubefix: {}".format(pytube_recovered_count))
+    logger.info("  Confirmed unavailable by API: {}".format(api_confirmed_unavailable_count))
+    logger.info("  Confirmed unavailable by pytubefix: {}".format(pytube_confirmed_unavailable_count))
     logger.info("  Placeholder entries added: {}".format(placeholder_count))
+    logger.info("  Confirmed unavailable ID occurrences removed from text files: {}".format(removed_from_seen_files))
     logger.info("  Output JSON: {}".format(output_json_path))
 
 
