@@ -1,4 +1,5 @@
 import json
+import re
 import pandas as pd
 import numpy as np
 from custom_logger import CustomLogger
@@ -217,11 +218,20 @@ class Preprocessing():
             if col not in df.columns:
                 df[col] = False
 
+        texts = self.get_text_series(df, text_source=text_source).tolist()
+
         if nlp is None:
-            logger.warning("spaCy not available; theme flags remain False.")
+            logger.warning(
+                "spaCy not available; using rule-based fallback theme detection instead."
+            )
+            df = self._add_theme_flags_rule_based(df, texts, theme_cols)
+            theme_counts = {col: int(df[col].sum()) for col in theme_cols}
+            logger.info(
+                "Rule-based fallback theme flag counts "
+                f"(number of videos with flag=True): {theme_counts}"
+            )
             return df
 
-        texts = self.get_text_series(df, text_source=text_source).tolist()
 
         logger.info(
             f"Running spaCy theme detection on {len(df)} videos (text_source={text_source})"
@@ -360,6 +370,49 @@ class Preprocessing():
 
         theme_counts = {col: int(df[col].sum()) for col in theme_cols}
         logger.info(f"Theme flag counts (number of videos with flag=True): {theme_counts}")
+
+        return df
+
+    def _add_theme_flags_rule_based(self, df: pd.DataFrame, texts: list[str], theme_cols: list[str]) -> pd.DataFrame:
+        """Add theme flags using regex and phrase rules when spaCy is unavailable.
+
+        This avoids silently producing all-zero theme trends when the spaCy model
+        cannot be loaded in a fresh environment. The rules intentionally mirror
+        the main spaCy-assisted detector but avoid tokenisation dependencies.
+        """
+        patterns = {
+            "has_whisper": re.compile(r"\bwhisper(?:s|ing|ed)?\b", re.IGNORECASE),
+            "has_no_talking": re.compile(
+                r"\b(no[-\s]?talk(?:ing)?|without\s+talking|no\s+speaking)\b",
+                re.IGNORECASE,
+            ),
+            "has_sleep": re.compile(r"\b(sleep|sleeping|sleepy|insomnia)\b|for\s+sleep", re.IGNORECASE),
+            "has_binaural": re.compile(
+                r"\b(binaural|3dio|3d\s+audio|3d\s+sound|8d\s+audio|8d\s+sound)\b",
+                re.IGNORECASE,
+            ),
+            "has_roleplay": re.compile(
+                r"\b(role[-\s]?play|roleplay|rp|exam|check[-\s]?up|haircut|barber)\b",
+                re.IGNORECASE,
+            ),
+            "has_ear_cleaning": re.compile(
+                r"\b(ear\s+(cleaning|massage|exam|attention|brushing)|otoscope)\b",
+                re.IGNORECASE,
+            ),
+            "has_mukbang": re.compile(r"\b(mukbang|eating\s+asmr|eating\s+sounds|eating\s+show)\b", re.IGNORECASE),
+            "has_keyboard": re.compile(r"\b(keyboard|typing|typewriter|typing\s+sounds?)\b", re.IGNORECASE),
+            "has_visual": re.compile(
+                r"\b(visuals?|visual\s+triggers?|hand\s+movements?|slow\s+movements?|trigger\s+assortment)\b",
+                re.IGNORECASE,
+            ),
+            "has_drive": re.compile(r"\b(driv(?:e|es|ing)|drive\s+with\s+me|car|road\s+trip)\b", re.IGNORECASE),
+        }
+
+        for idx, text in zip(df.index, texts):
+            txt = text if isinstance(text, str) else ""
+            for col in theme_cols:
+                pattern = patterns.get(col)
+                df.at[idx, col] = bool(pattern.search(txt)) if pattern is not None else False
 
         return df
 

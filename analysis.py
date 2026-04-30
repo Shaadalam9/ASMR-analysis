@@ -49,6 +49,96 @@ viz_summary = Viz_summaries()
 key_class = Keyword_analysis()
 
 
+THEME_COLUMNS = [
+    "has_whisper",
+    "has_no_talking",
+    "has_sleep",
+    "has_binaural",
+    "has_roleplay",
+    "has_ear_cleaning",
+    "has_mukbang",
+    "has_keyboard",
+    "has_visual",
+    "has_drive",
+]
+
+
+def _coerce_bool_theme_series(series: pd.Series) -> pd.Series:
+    """Return a real boolean Series from bool, numeric, or string theme values."""
+    if series.dtype == bool:
+        return series.fillna(False)
+
+    if pd.api.types.is_numeric_dtype(series):
+        return pd.to_numeric(series, errors="coerce").fillna(0).astype(float) > 0
+
+    normalized = series.fillna(False).astype(str).str.strip().str.lower()
+    return normalized.isin({"true", "1", "yes", "y", "t"})
+
+
+def _coerce_theme_columns(df: pd.DataFrame) -> pd.DataFrame:
+    """Ensure all known theme columns exist and are stored as booleans."""
+    for col in THEME_COLUMNS:
+        if col not in df.columns:
+            df[col] = False
+        df[col] = _coerce_bool_theme_series(df[col])
+    return df
+
+
+def _theme_flag_counts(df: pd.DataFrame) -> pd.DataFrame:
+    """Return a compact count/share table for all theme flags."""
+    rows = []
+    total = len(df)
+    for col in THEME_COLUMNS:
+        if col not in df.columns:
+            count = 0
+        else:
+            count = int(_coerce_bool_theme_series(df[col]).sum())
+        rows.append(
+            {
+                "theme": col,
+                "true_count": count,
+                "total_videos": total,
+                "share": count / total if total else 0.0,
+            }
+        )
+    return pd.DataFrame(rows)
+
+
+def _ensure_theme_flags_are_valid(df: pd.DataFrame, text_source: str, enriched_pickle: str) -> pd.DataFrame:
+    """Refresh cached theme flags when they are missing or suspiciously all zero."""
+    missing_before = [col for col in THEME_COLUMNS if col not in df.columns]
+    df = _coerce_theme_columns(df)
+    counts = _theme_flag_counts(df)
+    logger.info("Theme flag counts before validation:\n" + counts.to_string(index=False))
+
+    should_refresh = bool(missing_before) or (int(counts["true_count"].sum()) == 0 and len(df) > 0)
+    if should_refresh:
+        if missing_before:
+            logger.warning(
+                "The cached enriched dataset is missing theme columns: "
+                f"{missing_before}. Refreshing theme detection from the text columns."
+            )
+        else:
+            logger.warning(
+                "All theme flags are zero. Refreshing theme detection from the text columns; "
+                "this usually means the cached enriched pickle was created before theme detection "
+                "worked, or spaCy was unavailable."
+            )
+
+        df = pre_process_class.add_theme_flags(df, text_source=text_source)
+        df = _coerce_theme_columns(df)
+        counts = _theme_flag_counts(df)
+        logger.info("Theme flag counts after refresh:\n" + counts.to_string(index=False))
+        df.to_pickle(enriched_pickle)
+
+        if int(counts["true_count"].sum()) == 0:
+            logger.warning(
+                "Theme flags are still all zero after refresh. Check that title/description "
+                "text is present and that the theme rules match your corpus."
+            )
+
+    return df
+
 def run_wordcloud_pipeline(data: Dict[str, Any], text_source: str = "both") -> None:
     """Generate and save a word-cloud visualization for ASMR video text.
 
@@ -779,9 +869,15 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         logger.info(f"Saving enriched dataset to pickle {enriched_pickle}")
         df.to_pickle(enriched_pickle)
 
+    df = _ensure_theme_flags_are_valid(df, text_source=text_source, enriched_pickle=enriched_pickle)
+
     logger.info(
         f"Enriched DataFrame ready with {len(df)} rows and {len(df.columns)} columns."
     )
+
+    theme_counts_path = os.path.join(analysis_dir, "theme_flag_counts.csv")
+    _theme_flag_counts(df).to_csv(theme_counts_path, index=False)
+    logger.info(f"Theme flag counts saved to {theme_counts_path}")
 
     print_dataset_summary(df)
 
@@ -852,7 +948,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
     )
     viz_summary.plot_language_growth(lang_growth)
 
-    for theme in ["has_no_talking", "has_binaural"]:
+    for theme in THEME_COLUMNS:
         if theme in df.columns:
             trend_all = summary_class.compute_theme_trend_over_time(
                 df, theme_col=theme, by_language=False
@@ -873,17 +969,13 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
             viz_summary.plot_theme_trend_overall(trend_all, theme)
             viz_summary.plot_theme_trend_by_language(trend_lang, theme)
 
-    drive_trend = summary_class.compute_theme_trend_over_time(
-        df,
-        theme_col="has_drive",
-        by_language=False,
-    )
-    if not drive_trend.empty:
-        drive_trend.to_csv(
-            os.path.join(analysis_dir, "drive_trend_overall.csv"),
-            index=False,
-        )
-        viz_summary.plot_theme_trend_overall(drive_trend, theme_col="drive")
+            if theme == "has_drive":
+                # Keep the historical output names expected by earlier runs.
+                trend_all.to_csv(
+                    os.path.join(analysis_dir, "drive_trend_overall.csv"),
+                    index=False,
+                )
+                viz_summary.plot_theme_trend_overall(trend_all, theme_col="drive")
 
     # ------------------------------------------------------------------
     # KMeans clustering (PCA embedding) with PKL caching
@@ -979,36 +1071,90 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         # Stable colors; highlight_cluster can be set here if desired
         clustering_class.plot_cluster_distribution(clustered_df, name_suffix="pca")
 
-    #     # ------------------------------------------------------------------
-    #     # t-SNE embedding of clusters with PKL caching
-    #     # ------------------------------------------------------------------
-        tsne_cluster_pickle = os.path.join(
+        # ------------------------------------------------------------------
+        # UMAP embedding of clusters with PKL caching
+        # ------------------------------------------------------------------
+        umap_svd_components = 50
+        umap_n_neighbors = 30
+        umap_min_dist = 0.1
+        umap_metric = "cosine"
+        # Full coverage is preserved in the saved UMAP coordinates and static PNG.
+        # Interactive browser plots are capped so they remain openable.
+        umap_interactive_plot_max_points = 12000
+
+        umap_cluster_pickle = os.path.join(
             analysis_dir,
-            f"asmr_videos_with_clusters_tsne_{text_source}.pkl",
+            (
+                f"asmr_videos_with_clusters_umap_{text_source}_"
+                f"svd{umap_svd_components}_nn{umap_n_neighbors}_mindist{str(umap_min_dist).replace('.', 'p')}.pkl"
+            ),
         )
 
-        if os.path.isfile(tsne_cluster_pickle):
-            logger.info(f"Loading t-SNE clustered dataset from pickle {tsne_cluster_pickle}")
-            clustered_tsne_df = pd.read_pickle(tsne_cluster_pickle)
-        else:
-            logger.info("No t-SNE clustered pickle found; computing t-SNE embedding...")
-            clustered_tsne_df, tsne_pipeline = clustering_class.cluster_videos_tsne(
-                df, n_clusters=11, text_source=TEXT_SOURCE
-            )
-            logger.info(f"Saving t-SNE clustered dataset to pickle {tsne_cluster_pickle}")
-            clustered_tsne_df.to_pickle(tsne_cluster_pickle)
+        recompute_umap = True
+        if os.path.isfile(umap_cluster_pickle):
+            logger.info(f"Loading full UMAP clustered dataset from pickle {umap_cluster_pickle}")
+            clustered_umap_df = pd.read_pickle(umap_cluster_pickle)
+            if {"embedding_x", "embedding_y"}.issubset(clustered_umap_df.columns):
+                n_valid_umap = clustered_umap_df.dropna(subset=["embedding_x", "embedding_y"]).shape[0]
+                recompute_umap = n_valid_umap == 0
+                if recompute_umap:
+                    logger.warning(
+                        "Cached UMAP pickle has no valid 2D coordinates; recomputing UMAP."
+                    )
+                else:
+                    logger.info(
+                        f"Cached UMAP pickle contains {n_valid_umap} rows with valid 2D coordinates."
+                    )
+            else:
+                logger.warning(
+                    "Cached UMAP pickle is missing embedding_x / embedding_y; recomputing UMAP."
+                )
 
-        clustering_class.plot_tsne_research(clustered_tsne_df)
-
-        tsne_embedding_csv = os.path.join(analysis_dir, "cluster_embedding_2d_tsne.csv")
-
-        if {"embedding_x", "embedding_y"}.issubset(clustered_tsne_df.columns):
-            clustered_tsne_df[emb_cols].to_csv(tsne_embedding_csv, index=False)
+        if recompute_umap:
             logger.info(
-                f"2D t-SNE embedding for clusters saved to {tsne_embedding_csv}"
+                "Computing UMAP embedding for every video in the dataset..."
+            )
+            clustered_umap_df, umap_pipeline = clustering_class.cluster_videos_umap(
+                df,
+                n_clusters=11,
+                text_source=text_source,
+                umap_n_neighbors=umap_n_neighbors,
+                umap_min_dist=umap_min_dist,
+                umap_metric=umap_metric,
+                svd_components=umap_svd_components,
+            )
+            logger.info(f"Saving full UMAP clustered dataset to pickle {umap_cluster_pickle}")
+            clustered_umap_df.to_pickle(umap_cluster_pickle)
+
+        # Full-dataset static plot: includes every video with UMAP coordinates.
+        clustering_class.plot_embedding_static_full(
+            clustered_umap_df,
+            name_suffix="umap_full",
+            embedding_name="UMAP",
+            filename_prefix="cluster_umap_full_static",
+        )
+
+        # Interactive research plot: sampled only for browser responsiveness.
+        clustering_class.plot_umap_research(
+            clustered_umap_df,
+            max_points=umap_interactive_plot_max_points,
+        )
+
+        umap_embedding_csv = os.path.join(analysis_dir, "cluster_embedding_2d_umap.csv")
+
+        if {"embedding_x", "embedding_y"}.issubset(clustered_umap_df.columns):
+            umap_emb_df = clustered_umap_df.dropna(subset=["embedding_x", "embedding_y"])
+            umap_emb_df[emb_cols].to_csv(umap_embedding_csv, index=False)
+            logger.info(
+                f"2D UMAP embedding for full clusters saved to {umap_embedding_csv} "
+                f"({len(umap_emb_df)} rows with non-null embeddings)"
             )
 
-        clustering_class.plot_cluster_distribution(clustered_tsne_df, name_suffix="tsne")
+        clustering_class.plot_cluster_distribution(
+            clustered_umap_df,
+            name_suffix="umap",
+            max_scatter_points=umap_interactive_plot_max_points,
+        )
 
     logger.info(
         f"Analytics pipeline complete. CSVs and figures written to {analysis_dir}"

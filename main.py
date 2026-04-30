@@ -971,6 +971,21 @@ class ASMRFetcher:
 
         return seen_ids_list
 
+    def _delete_json_backup_files(self) -> None:
+        """Delete JSON backup files after a successful atomic write."""
+        folder = os.path.dirname(self.json_output) or "."
+        base_name = os.path.basename(self.json_output)
+        backup_prefix = base_name + ".bak"
+
+        try:
+            for name in os.listdir(folder):
+                if name == backup_prefix or name.startswith(backup_prefix + "_"):
+                    backup_file = os.path.join(folder, name)
+                    if os.path.isfile(backup_file):
+                        os.remove(backup_file)
+        except Exception as exc:  # noqa: BLE001
+            logger.warning(f"Could not delete old JSON backup files: {exc}")
+
     def _write_json_atomic(self, data: Dict[str, Dict[str, Any]]) -> None:
         """Safely write JSON using a temp file, fsync, backup, and atomic replace."""
         output_dir = os.path.dirname(self.json_output) or "."
@@ -985,11 +1000,14 @@ class ASMRFetcher:
                 f.flush()
                 os.fsync(f.fileno())
 
-            # Keep one backup of the last good JSON before replacing it.
+            # Keep a temporary backup only until the new JSON is safely in place.
             if os.path.exists(self.json_output):
                 shutil.copy2(self.json_output, backup_path)
 
             os.replace(tmp_path, self.json_output)
+
+            # The new file was created successfully, so remove old backup files.
+            self._delete_json_backup_files()
         except Exception:
             if os.path.exists(tmp_path):
                 try:

@@ -215,6 +215,17 @@ class Summaries():
             )
         return growth
 
+    def _coerce_theme_flags(self, series: pd.Series) -> pd.Series:
+        """Coerce bool-like theme values to real booleans before counting."""
+        if series.dtype == bool:
+            return series.fillna(False)
+
+        if pd.api.types.is_numeric_dtype(series):
+            return pd.to_numeric(series, errors="coerce").fillna(0).astype(float) > 0
+
+        normalized = series.fillna(False).astype(str).str.strip().str.lower()
+        return normalized.isin({"true", "1", "yes", "y", "t"})
+
     def compute_theme_trend_over_time(self, df: pd.DataFrame, theme_col: str,
                                       by_language: bool = False) -> pd.DataFrame:
         """
@@ -225,12 +236,13 @@ class Summaries():
 
         df_tmp = df.dropna(subset=["upload_year"]).copy()
         df_tmp["upload_year"] = df_tmp["upload_year"].astype(int)
+        df_tmp["_theme_flag"] = self._coerce_theme_flags(df_tmp[theme_col])
 
         group_keys = ["upload_year"]
         if by_language:
             group_keys.append("language")
 
-        grouped = df_tmp.groupby(group_keys)[theme_col]
+        grouped = df_tmp.groupby(group_keys)["_theme_flag"]
 
         trend = (
             grouped.agg(
@@ -239,13 +251,22 @@ class Summaries():
             )
             .reset_index()
         )
+        trend["theme_count"] = pd.to_numeric(trend["theme_count"], errors="coerce").fillna(0).astype(int)
+        trend["total_videos"] = pd.to_numeric(trend["total_videos"], errors="coerce").fillna(0).astype(int)
+        trend["theme_share"] = trend["theme_count"] / trend["total_videos"].replace(0, pd.NA)
+        trend["theme_share"] = trend["theme_share"].astype(float)
 
         if not trend.empty:
+            total_themed = int(trend["theme_count"].sum())
             logger.info(
                 f"Trend for {theme_col} (by_language={by_language}): "
-                f"{len(trend)} rows, total themed videos="
-                f"{int(trend['theme_count'].sum())}"
+                f"{len(trend)} rows, total themed videos={total_themed}"
             )
+            if total_themed == 0:
+                logger.warning(
+                    f"Trend for {theme_col} contains only zeros. Check the theme flag counts "
+                    "and whether the enriched pickle was created before theme detection worked."
+                )
 
         return trend
 

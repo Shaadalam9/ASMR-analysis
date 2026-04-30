@@ -75,7 +75,7 @@ class Plots():
 
     def save_plotly_figure(self, fig: Any, filename: str, width: int = 1600, height: int = 900,
                            scale: int = SCALE, save_final: bool = True, save_png: bool = True,
-                           save_eps: bool = True) -> None:
+                           save_eps: bool = True, auto_open: bool = True) -> None:
         """Save a Plotly figure as HTML, PNG, and EPS formats."""
         output_final = os.path.join(common.root_dir, "figures")
         os.makedirs(common.output_dir, exist_ok=True)
@@ -116,7 +116,7 @@ class Plots():
         py.offline.plot(
             fig,
             filename=html_path,
-            auto_open=True,
+            auto_open=auto_open,
         )
 
         if save_final:
@@ -158,9 +158,9 @@ class Plots():
                 if save_final:
                     final_eps_path = os.path.join(output_final, filename + ".eps")
                     shutil.copy(eps_path, final_eps_path)
-        except ValueError as exc:
+        except Exception as exc:
             logger.error(
-                f"Value error raised when attempted to save image {filename}: {exc}"
+                f"Error raised when attempting to save image {filename}: {exc}"
             )
 
     def _get_cluster_color_map(self, clusters: np.ndarray) -> Dict[str, str]:

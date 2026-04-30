@@ -250,11 +250,20 @@ class Viz_summaries():
             )
             return
 
+        df_plot["upload_year"] = pd.to_numeric(df_plot["upload_year"], errors="coerce")
+        df_plot["theme_count"] = pd.to_numeric(df_plot["theme_count"], errors="coerce").fillna(0)
+        df_plot = df_plot.dropna(subset=["upload_year"]).sort_values("upload_year")
+
+        total_themed = int(df_plot["theme_count"].sum())
         logger.info(
             f"Overall theme trend for {theme_col}: "
-            f"{len(df_plot)} years, total themed videos="
-            f"{int(df_plot['theme_count'].sum())}."
+            f"{len(df_plot)} years, total themed videos={total_themed}."
         )
+        if total_themed == 0:
+            logger.warning(
+                f"Overall theme trend for {theme_col} is all zero; the plot is being saved "
+                "for diagnostics, but the theme flags should be checked."
+            )
 
         fig = px.line(
             df_plot,
@@ -294,6 +303,10 @@ class Viz_summaries():
                 "skipping theme trend by language plot."
             )
             return
+
+        df_plot["upload_year"] = pd.to_numeric(df_plot["upload_year"], errors="coerce")
+        df_plot["theme_count"] = pd.to_numeric(df_plot["theme_count"], errors="coerce").fillna(0)
+        df_plot = df_plot.dropna(subset=["upload_year"]).sort_values(["language", "upload_year"])
 
         counts = (
             df_plot.groupby("language")["theme_count"]
