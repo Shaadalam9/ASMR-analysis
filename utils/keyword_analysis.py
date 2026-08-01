@@ -202,7 +202,8 @@ class Keyword_analysis():
         return trend
 
     def run_verb_lemma_wordcloud_pipeline(self, data: Dict[str, Any], text_source: str = "both",
-                                          model_name: str = "en_core_web_sm", top_k: int = 200) -> None:
+                                          model_name: str = "en_core_web_sm", top_k: int = 200,
+                                          use_cache: bool = True) -> None:
         """
         Build a wordcloud of lemmatised words, restricted to verbs.
 
@@ -219,7 +220,7 @@ class Keyword_analysis():
             f"spacy_keywords_verbs_{text_source}.pkl",
         )
 
-        if os.path.isfile(verb_pickle):
+        if os.path.isfile(verb_pickle) and use_cache:
             logger.info(f"Loading verb spaCy keyword counts from {verb_pickle}")
             keyword_df = pd.read_pickle(verb_pickle)
         else:

@@ -1,305 +1,268 @@
-## ASMR video analysis
+# ASMR YouTube analysis
 
-## Citation and usage of code
-If you use this work for academic work please cite the following paper:
+This repository contains the collection, enrichment, analysis, and visualisation code for:
 
-> Alam, M. S., & Bazilinskyy, P. (2026). Nineteen Years of ASMR on YouTube: A Multilingual, Theme-Level Analysis of 52,002 Videos. Under review. Available at https://shaadalam9.github.io/publications/alam2026ASMR
+> Alam, M. S., and Bazilinskyy, P. (2026). *Nineteen years of ASMR on YouTube: A multilingual, theme-level analysis of 89,241 videos*. PLOS ONE manuscript PONE-D-26-27689, under revision.
 
-The code is open-source and free to use. It is aimed for, but not limited to, academic research. We welcome forking of this repository, pull requests, and any contributions in the spirit of open science and open-source code. For inquiries about collaboration, you may contact Md Shadab Alam (md_shadab_alam@outlook.com) or Pavlo Bazilinskyy (pavlo.bazilinskyy@gmail.com).
+The study describes 89,241 explicitly labelled ASMR videos uploaded between 1 January 2008 and 31 July 2026. Metadata were processed on 1 August 2026, which is also the fixed reference date for the publication analysis.
 
-## Getting started
-[![Python Version](https://img.shields.io/badge/python-3.12-blue.svg)](https://www.python.org/downloads/release/python-312/)
-[![Package Manager: uv](https://img.shields.io/badge/package%20manager-uv-green)](https://docs.astral.sh/uv/)
+## Scope
 
-Tested with **Python 3.12** and the [`uv`](https://docs.astral.sh/uv/) package manager.  
-Follow these steps to set up the project.
+The code supports four tasks:
 
-**Step 1:** Install `uv`. `uv` is a fast Python package and environment manager. Install it using one of the following methods:
+1. Discover videos using the YouTube Data API and the public YouTube search interface through `pytubefix`.
+2. Enrich and recover video metadata.
+3. Derive descriptive measures, title features, and textual theme labels.
+4. Produce summary tables, figures, K means clusters, and a full corpus UMAP projection.
 
-**macOS / Linux (bash/zsh):**
+This is a descriptive platform metadata study. The code does not infer viewer wellbeing, sleep quality, subjective ASMR experiences, or causal effects.
+
+## Repository structure
+
+| Path | Purpose |
+| --- | --- |
+| `main.py` | Windowed video discovery and initial metadata collection |
+| `JSONMetadataEnricher.py` | Optional refresh of existing metadata and video statistics |
+| `recover_from_seen_ids.py` | Recovery of identifiers missing from the main JSON file |
+| `analysis.py` | Publication analysis entry point |
+| `utils/preprocessing.py` | Derived measures, title features, language normalisation, and theme labels |
+| `utils/summaries.py` | Descriptive summary tables and temporal counts |
+| `utils/clustering_utils.py` | TF IDF features, K means, PCA, t SNE, and UMAP |
+| `utils/viz_core.py` | Common figure generation and export |
+| `default.config` | Versioned publication defaults |
+| `tests/` | Deterministic unit tests that do not require YouTube access |
+
+## Reproducibility safeguards
+
+The revision package includes the following safeguards:
+
+* `analysis_reference_date` is fixed to `2026-08-01T00:00:00Z`. Views per day and likes per day therefore do not change simply because the analysis is rerun later.
+* Theme detection defaults to the deterministic rule based method used for the reported manuscript results. It no longer changes silently according to whether a local spaCy model is installed.
+* `force_recompute` defaults to `true`, so stale pickle files cannot silently determine publication results.
+* Randomised algorithms use the configured seed of 42.
+* Every analysis run writes `_output/analysis/reproducibility_manifest.json`, containing the input data SHA256 digest, record count, analysis settings, Python version, and package versions.
+* The reproducibility manifest reports coverage of the optional `metadataCollectedAt` and `languageSource` provenance fields. The deposited publication snapshot does not retain these record level fields, so the manifest reports zero timestamps and an unknown language source while preserving the existing language labels.
+* Local configuration, credentials, raw data, caches, and generated output are excluded from version control.
+
+## Requirements
+
+* Python 3.12
+* [`uv`](https://docs.astral.sh/uv/)
+
+Install `uv`, clone the repository, and create the locked environment:
+
 ```bash
-curl -LsSf https://astral.sh/uv/install.sh | sh
-```
-
-**Windows (PowerShell):**
-```powershell
-irm https://astral.sh/uv/install.ps1 | iex
-```
-
-**Alternative (if you already have Python and pip):**
-```bash
-pip install uv
-```
-
-**Step 2:** Fix permissions (if needed):t
-
-Sometimes `uv` needs to create a folder under `~/.local/share/uv/python` (macOS/Linux) or `%LOCALAPPDATA%\uv\python` (Windows).  
-If this folder was created by another tool (e.g. `sudo`), you may see an error like:
-```lua
-error: failed to create directory ... Permission denied (os error 13)
-```
-
-To fix it, ensure you own the directory:
-
-### macOS / Linux
-```bash
-mkdir -p ~/.local/share/uv
-chown -R "$(id -un)":"$(id -gn)" ~/.local/share/uv
-chmod -R u+rwX ~/.local/share/uv
-```
-
-### Windows
-```powershell
-# Create directory if it doesn't exist
-New-Item -ItemType Directory -Force "$env:LOCALAPPDATA\uv"
-
-# Ensure you (the current user) own it
-# (usually not needed, but if permissions are broken)
-icacls "$env:LOCALAPPDATA\uv" /grant "$($env:UserName):(OI)(CI)F"
-```
-
-**Step 3:** After installing, verify:
-```bash
-uv --version
-```
-
-**Step 4:** Clone the repository:
-```command line
-git clone https://github.com/Shaadalam9/ASMR-analysis
-cd multiped
-```
-
-**Step 5:** Ensure correct Python version. If you don’t already have Python 3.12 installed, let `uv` fetch it:
-```command line
-uv python install 3.12
-```
-The repo should contain a .python-version file so `uv` will automatically use this version.
-
-**Step 6:** Create and sync the virtual environment. This will create **.venv** in the project folder and install dependencies exactly as locked in **uv.lock**:
-```command line
+git clone https://github.com/Shaadalam9/ASMR-analysis.git
+cd ASMR-analysis
 uv sync --frozen
 ```
 
-**Step 7:** Activate the virtual environment:
+The repository contains `.python-version`, `pyproject.toml`, and `uv.lock`. The frozen installation should therefore use the same dependency resolution as the publication release.
 
-**macOS / Linux (bash/zsh):**
+## Data
+
+The code archive does not contain API credentials or the research dataset. Place the deposited dataset at:
+
+```text
+data/asmr_results.json
+```
+
+The expected structure is a JSON object keyed by YouTube video identifier:
+
+```json
+{
+  "VIDEO_ID": {
+    "title": "Example ASMR title",
+    "description": "Example description",
+    "duration": 1200,
+    "channelId": "CHANNEL_ID",
+    "author": "Channel name",
+    "views": 100000,
+    "likes": 4000,
+    "uploadDate": "2020-01-01T12:00:00Z",
+    "language": "en",
+    "languageSource": null,
+    "channel_average_views": 85000.0,
+    "metadataCollectedAt": null
+  }
+}
+```
+
+For exact reproduction of the paper, use the deposited 89,241 video snapshot rather than recollecting current YouTube values. The publication snapshot has SHA256 digest `e260339147d2af21c7fc796d73f26e2f382cc29385443bcee65d189c34eccb18`. YouTube statistics and availability change over time.
+
+## Configuration
+
+The versioned defaults in `default.config` reproduce the publication settings. A local `config` file is optional. When present, it only needs to contain values that override the defaults.
+
+| Setting | Publication value | Meaning |
+| --- | --- | --- |
+| `data` | `data` | Directory containing `asmr_results.json` |
+| `query` | `ASMR` | Search term and required title substring |
+| `analysis_text_source` | `both` | Use concatenated titles and descriptions |
+| `date_before` | `null` | Optional collection upper date bound |
+| `date_after` | `null` | Optional collection lower date bound |
+| `date_window_months` | `3` | YouTube API search window size |
+| `analysis_reference_date` | `2026-08-01T00:00:00Z` | Fixed denominator date for daily rates |
+| `theme_detection_mode` | `rule_based` | Deterministic textual theme method |
+| `theme_rule_version` | `1.0.0` | Version recorded in output and caches |
+| `force_recompute` | `true` | Rebuild publication outputs instead of trusting caches |
+| `refresh_existing_statistics` | `false` | Preserve deposited values unless an explicit refresh is requested |
+| `random_seed` | `42` | Seed for clustering and sampling |
+| `clustering_n_clusters` | `11` | K used for the reported exploratory solution |
+| `auto_open_plots` | `false` | Do not open browser windows during batch runs |
+
+Example local override:
+
+```json
+{
+  "data": "/path/to/deposited/data"
+}
+```
+
+## Credentials
+
+Credentials must never be committed or included in a shared ZIP file. For collection or metadata refresh, set one of these environment variables:
+
 ```bash
-source .venv/bin/activate
+export YOUTUBE_API_KEY="your_key"
 ```
 
-**Windows (PowerShell):**
-```powershell
-.\.venv\Scripts\Activate.ps1
+or, for key rotation:
+
+```bash
+export YOUTUBE_API_KEYS="key_one,key_two"
 ```
 
-**Windows (cmd.exe):**
-```bat
-.\.venv\Scripts\activate.bat
+The scripts retain backwards compatibility with an ignored local `secret` JSON file, but environment variables are recommended.
+
+## Reproduce the publication analysis
+
+With the deposited JSON snapshot in `data/asmr_results.json`, run:
+
+```bash
+uv run python analysis.py
 ```
 
-**Step 8:** Ensure that dataset are present. Place required datasets (including **mapping.csv**) into the **data/** directory:
+The main machine readable outputs are written to `_output/analysis/`. Publication copies of figures are also written to `figures/`.
 
+Important outputs include:
 
-**Step 9:** Run the code:
-```command line
-python3 analysis.py
+* `reproducibility_manifest.json`
+* `asmr_videos_enriched.csv`
+* `duration_stats.csv`
+* `language_stats.csv`
+* `title_style_stats.csv`
+* `theme_flag_counts.csv`
+* theme trend tables
+* cluster summaries and full UMAP coordinates
+
+Run the deterministic tests with:
+
+```bash
+uv run python -m unittest discover -s tests -v
 ```
 
-### Configuration of project
+## Collect a new dataset
 
-Configuration of the project needs to be defined in `config`. Please use the `default.config` file for the required structure of the file. If no custom config file is provided, `default.config` is used.
+Set valid date bounds in a local `config` file and provide a YouTube API key. Then run:
 
-The config file has the following parameters:
+```bash
+uv run python main.py
+```
 
-- **`data`**  
-  Path to the directory containing the project’s data files (e.g., `data`).
+The API branch partitions the configured period into consecutive three month windows. The `pytubefix` branch uses YouTube search relevance ordering and is therefore a supplementary discovery route rather than a guarantee of complete platform coverage.
 
-- **`query`**  
-  The search query string used to discover videos (e.g., `"ASMR"`, `"ASMR roleplay"`, etc.).
+A record is retained when:
 
-- **`analysis_text_source`**  
-  Controls which textual fields are used in text-based analyses and visualisations.  
-  Valid values:
-  - `"title"` – use video titles only  
-  - `"description"` – use video descriptions only  
-  - `"both"` – use titles and descriptions concatenated (default)
+* its title contains the configured query as a case insensitive substring;
+* it is a standard video result;
+* its known duration is at least 59 seconds;
+* it passes the configured upload date bounds; and
+* its video identifier is not already present.
 
-- **`date_before`**  
-  Optional upper bound on video upload date in ISO format (`YYYY-MM-DD`).  
-  When set, only videos uploaded *on or before* this date are included.  
-  If left as the placeholder string `"YYYY-MM-DD"`, it is treated as unset.
+Search results are not a census of all YouTube content. API limits, ranking, removed videos, private videos, missing fields, and platform changes affect recall.
 
-- **`date_after`**  
-  Optional lower bound on video upload date in ISO format (`YYYY-MM-DD`).  
-  When set, only videos uploaded *on or after* this date are included.  
-  If left as the placeholder string `"YYYY-MM-DD"`, it is treated as unset.
+## Create or refresh a metadata snapshot
 
-- **`date_window_months`**  
-  Size (in months) of the relative time window used when explicit `date_before` / `date_after` bounds are not provided. This is used by the collection/analysis pipeline to restrict the dataset to a recent window instead of the full historical range.
+Do not run `JSONMetadataEnricher.py`, `main.py`, or `recover_from_seen_ids.py` when reproducing the publication analysis from the deposited snapshot. These scripts can change the corpus or its metadata. For exact reproduction, run only the tests and `analysis.py`.
 
-- **`font_family`**  
-  Font family used in figures (e.g., Plotly and Matplotlib outputs), such as `"Libertine"`.
+To preserve deposited values, `refresh_existing_statistics` is `false` by default. To deliberately refresh views and likes for all existing records, create a local override:
 
-- **`font_size`**  
-  Base font size used in figures (axis labels, titles, legends, etc.).
+```json
+{
+  "refresh_existing_statistics": true
+}
+```
 
-- **`plotly_template`**  
-  Name of the Plotly template to use for all interactive figures (e.g., `"plotly_white"`).
+Then run:
 
-- **`logger_level`**  
-  Verbosity level of console logging. Valid values are:
-  - `"debug"`
-  - `"info"`
-  - `"warning"`
-  - `"error"`
+```bash
+uv run python JSONMetadataEnricher.py
+```
 
+Archive the resulting JSON once the refresh finishes and report the actual retrieval period. A refresh performed after publication will not reproduce the original numerical results because YouTube metrics change continuously.
 
-## Results
+## Implemented measures
 
-### Word clouds
+For video \(v\), with the fixed reference date used to calculate age:
 
-[![Word cloud of ASMR video titles](figures/wordcloud_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_title.html)  
-Word cloud generated from ASMR video **titles** only. Larger terms reflect words frequently used in video naming, revealing common framing strategies, thematic cues, and stylistic conventions.
+```text
+views_per_day(v) = views(v) / days_since_upload(v)
+likes_per_day(v) = likes(v) / days_since_upload(v)
+engagement_rate(v) = likes(v) / views(v)
+```
 
-[![Word cloud of ASMR video descriptions](figures/wordcloud_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_description.html)  
-Word cloud derived from **descriptions** only. This highlights how creators contextualize their videos, promote content, and articulate use-cases such as sleep support, relaxation, or role-play scenarios.
+Engagement is missing when views are zero or missing. Group means are calculated over the videos with a valid value for the relevant measure.
 
-[![Word cloud of ASMR video titles and descriptions](figures/wordcloud_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_both.html)  
-Combined word cloud using **titles and descriptions together**, providing a holistic overview of the most frequent vocabulary across both fields and summarizing overarching themes in creator communication.
+Duration groups are:
 
----
+* under 10 minutes
+* 10 to under 30 minutes
+* 30 to under 60 minutes
+* 60 to under 180 minutes
+* 180 minutes or longer
+* unknown
 
-### Verb-only word clouds (spaCy lemmas)
+## Language labels
 
-[![Word cloud of verb lemmas in ASMR titles](figures/wordcloud_verbs_title.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_title.html)  
-Verb-only word cloud extracted from **titles**, where each verb lemma is counted at most once per video. This isolates action words used in ASMR titles (e.g., whisper, tap, brush, sleep).
+The collection code uses the following order:
 
-[![Word cloud of verb lemmas in ASMR descriptions](figures/wordcloud_verbs_description.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_description.html)  
-Verb-only word cloud extracted from **descriptions**. This highlights the actions described by creators when explaining their videos, such as brushing, guiding, helping, or tapping.
+1. YouTube `defaultAudioLanguage`
+2. YouTube `defaultLanguage`
+3. deterministic `langdetect` prediction from the concatenated title and description
 
-[![Word cloud of verb lemmas in ASMR titles and descriptions](figures/wordcloud_verbs_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_verbs_both.html)  
-Verb-only cloud using **titles and descriptions combined**, emphasizing recurring ASMR actions across the entire dataset. This captures the behavioural and trigger-oriented vocabulary that defines ASMR production.
+The selected source is stored in `languageSource` when available. The deposited 89,241 record publication snapshot retains the language labels but not their record level source field; the reproducibility manifest therefore reports the source as `unknown`. Language detection from short, mixed language, or creator supplied text can be inaccurate and should be interpreted as metadata level classification.
+Known code aliases are normalised to shared display names. Unrecognised nonempty codes are preserved rather than being merged with genuinely missing language values.
 
+## Theme labels
 
-### Keyword frequencies (spaCy lemmas)
+The reported themes are Boolean textual indicators derived from lowercased titles and descriptions. The default rules match English lexical forms for:
 
-[![Top spaCy keyword lemmas](figures/spacy_keywords_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/spacy_keywords_both.html)  
-Bar chart of the most frequent content lemmas (after stopword removal), computed with spaCy. Each bar shows in how many videos a lemma appears at least once, providing a complementary, more linguistically grounded view to the word clouds.
+* whisper
+* no talking
+* sleep
+* binaural or spatial audio
+* role play
+* ear focused content
+* mukbang or eating
+* keyboard or typing
+* visual triggers
+* driving
 
----
+These are not manually verified audiovisual content categories. The dataset is multilingual, but the reported theme rules are primarily English lexical rules. Consequently, prevalence can be underestimated for creators who use equivalent labels only in other languages. The exact regular expressions are versioned in `utils/preprocessing.py`.
 
-### Duration vs popularity
+The optional `spacy` mode is retained for exploratory work. It is not the publication default and fails explicitly if the requested model is unavailable.
 
-[![Duration vs views (log–log)](figures/duration_vs_views.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_vs_views.html)  
-Log–log scatter plot of video duration (in seconds) versus total views. Each point is a video. This figure shows whether longer ASMR videos systematically attract more views or whether extremely short/long videos behave differently from “typical” lengths.
+## Exploratory clustering
 
----
+The clustering input combines:
 
-### Distribution of popularity (log-normality check)
+* up to 5,000 TF IDF title and description unigram and bigram features, with minimum document frequency 5;
+* standardised duration, engagement rate, and views per day;
+* one hot encoded language labels.
 
-[![Q–Q plot of log10(views)](figures/log_views_qq_plot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/log_views_qq_plot.html)  
-Q–Q plot comparing the empirical distribution of \(\log_{10}(\text{views})\) against a theoretical normal distribution. Points close to the dashed line indicate that a log-normal model is a reasonable approximation for view counts; systematic deviations highlight heavy tails or skew.
+K means uses \(k=11\), seed 42, and ten initialisations. UMAP is a visual projection of the fitted feature space, not a definitive taxonomy of ASMR subgenres. The two dimensional UMAP uses 50 TruncatedSVD components, 30 neighbours, minimum distance 0.1, cosine distance, and seed 42.
 
----
+## Licence
 
-### Language-level differences
-
-[![Mean views per day by language](figures/language_mean_views_per_day.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_mean_views_per_day.html)  
-Mean views per day by language (for languages with at least a minimum number of videos). This figure compares growth rates of ASMR content across languages (e.g., English vs Spanish vs others).
-
-[![Mean engagement rate by language](figures/language_mean_engagement_rate.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_mean_engagement_rate.html)  
-Mean engagement rate (likes / views) by language, showing which language communities tend to have more engaged ASMR audiences.
-
----
-
-### Title style and performance
-
-[![Mean engagement rate by title length](figures/title_length_mean_engagement_rate.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/title_length_mean_engagement_rate.html)  
-Mean engagement rate by title length bucket (e.g., ≤5 words, 6–10 words, 11–20 words, >20 words). This figure examines whether concise or longer ASMR titles correlate with higher engagement.
-
-[![Mean views by title length](figures/title_length_mean_views.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/title_length_mean_views.html)  
-Mean total views by title length bucket, indicating whether shorter or more descriptive titles are associated with higher popularity.
-
----
-
-### Themes vs growth (views per day distributions)
-
-[![Views per day distribution for whisper videos](figures/has_whisper_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_whisper_views_per_day_boxplot.html)  
-Distribution of views per day for videos with and without “whisper” themes. This boxplot compares growth patterns between whisper-based ASMR and other content.
-
-[![Views per day distribution for no-talking videos](figures/has_no_talking_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_views_per_day_boxplot.html)  
-Distribution of views per day for videos tagged as “no talking” (or similar) versus others. This shows whether no-talking ASMR tends to grow faster or slower than talking-based ASMR.
-
-[![Views per day distribution for sleep videos](figures/has_sleep_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_sleep_views_per_day_boxplot.html)  
-Distribution of views per day for sleep-oriented ASMR videos compared to non-sleep content, capturing whether “for sleep” videos exhibit different growth dynamics.
-
-[![Views per day distribution for binaural videos](figures/has_binaural_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_views_per_day_boxplot.html)  
-Distribution of views per day for videos mentioning “binaural” or related keywords versus other videos, exploring whether binaural setups are associated with different growth rates.
-
-[![Views per day distribution for “drive” videos](figures/has_drive_views_per_day_boxplot.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_drive_views_per_day_boxplot.html)  
-Distribution of views per day for “drive” / driving-themed ASMR videos compared to other content. This figure explores whether in-car / driving ASMR behaves differently in terms of growth.
-
----
-
-### Community growth over time
-
-[![Number of ASMR videos per month](figures/monthly_video_counts.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/monthly_video_counts.html)  
-Time series of the number of ASMR videos uploaded per month in the dataset. This visualizes the growth of the ASMR ecosystem over time.
-
-[![ASMR video uploads per year by language](figures/language_growth_over_years.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_growth_over_years.html)  
-Yearly counts of ASMR uploads by language (for languages with enough data). This figure compares how quickly different language communities have expanded.
-
----
-
-### Theme trends over time
-
-[![Number of no-talking videos over time](figures/has_no_talking_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_overall_fig.html)  
-Number of videos tagged as “no talking” (or similar) per year, aggregated across all languages. This shows whether no-talking ASMR has become more or less prevalent over time.
-
-
-[![Number of binaural videos over time](figures/has_binaural_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_overall_fig.html)  
-Number of videos with “binaural” (and related) keywords per year, aggregated across languages. This plot reveals when binaural ASMR started to gain traction and how its prevalence has evolved.
-
-
-[![Number of drive-themed videos over time](figures/drive_trend_overall_fig.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/drive_trend_overall_fig.html)  
-Visualisation of the yearly count of ASMR videos whose title or description includes the lemma “drive” (e.g., driving / road-trip role-plays).
-
----
-
-### Choosing the number of clusters (elbow method)
-
-[![K-means elbow curve for ASMR video clustering](figures/kmeans_elbow_both.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/kmeans_elbow_both.html)  
-Elbow plot of K-means inertia (within-cluster sum of squared errors) for \(k\) from 4 to 20, using title+description text, duration, engagement metrics, and language features. The curve shows diminishing returns in inertia reduction beyond about \(k = 11\), which we therefore select as the final number of clusters.
-
----
-
-### Clustering of ASMR videos (PCA embedding)
-
-[![Cluster sizes (PCA)](figures/cluster_sizes_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_pca.html)  
-Number of videos per cluster, where clusters are derived from title+description text, duration, engagement metrics, and language. This shows how the ASMR corpus is partitioned into natural content groups (PCA-based embedding).
-
-[![Mean views per day by cluster (PCA)](figures/cluster_mean_views_per_day_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_pca.html)  
-Mean views per day for each cluster (PCA-based clustering), comparing typical growth rates across the discovered ASMR content clusters.
-
-[![2D PCA embedding of ASMR video clusters](figures/cluster_scatter_embedding_pca.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_pca.html)  
-2D PCA embedding of ASMR videos based on title+description text, duration, engagement metrics, and language, with colors indicating clusters and dotted circles roughly outlining each cluster’s region. This offers an interpretable map of the ASMR content landscape.
-
----
-
-### Alternative t-SNE embedding of clusters
-
-[![Cluster sizes (t-SNE variant)](figures/cluster_sizes_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_tsne.html)  
-Number of videos per cluster when using the same K-means solution but visualised with a t-SNE-based embedding. This summarises how large each content cluster is under the t-SNE variant.
-
-[![Mean views per day by cluster (t-SNE variant)](figures/cluster_mean_views_per_day_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_tsne.html)  
-Mean views per day for each cluster under the t-SNE embedding, highlighting which content clusters tend to grow faster or slower, independent of the specific 2D embedding used for visualisation.
-
-[![2D t-SNE embedding of ASMR video clusters](figures/cluster_scatter_embedding_tsne.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_tsne.html)  
-2D t-SNE embedding of the same clustered videos, providing an alternative nonlinear view of the ASMR content space. Compared to PCA, t-SNE can highlight tighter local groupings at the cost of less interpretable global geometry.
-
----
-
-### Research-style t-SNE embedding with cluster ellipses
-
-[![Research-style t-SNE embedding with cluster ellipses](figures/cluster_tsne_research_tsne_research.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_tsne_research_tsne_research.html)  
-Research-style 2D t-SNE embedding of ASMR videos with clusters indicated by coloured points and dotted ellipse contours. Cluster labels mark approximate centroids, making it easier to inspect how languages, themes, and growth patterns align with different regions of the ASMR content space.
+The code is released under the MIT Licence. The YouTube data remain subject to the terms and policies applicable to their source and repository deposition.

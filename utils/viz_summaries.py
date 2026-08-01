@@ -12,6 +12,30 @@ plot_class = Plots()
 SCALE = 3
 
 
+THEME_DISPLAY_NAMES = {
+    "has_whisper": "whisper",
+    "has_no_talking": "no talking",
+    "has_sleep": "sleep related",
+    "has_binaural": "binaural or 3D audio",
+    "has_roleplay": "role play",
+    "has_ear_cleaning": "ear focused",
+    "has_mukbang": "mukbang or eating",
+    "has_keyboard": "keyboard or typing",
+    "has_visual": "visual trigger",
+    "has_drive": "driving",
+    # Kept for the legacy alias used by analysis.py for the driving plot.
+    "drive": "driving",
+}
+
+
+def theme_display_name(theme_col: str) -> str:
+    """Return a reader facing label for an internal theme column name."""
+    return THEME_DISPLAY_NAMES.get(
+        theme_col,
+        theme_col.removeprefix("has_").replace("_", " "),
+    )
+
+
 class Viz_summaries():
     def __init__(self) -> None:
         pass
@@ -170,7 +194,7 @@ class Viz_summaries():
             y="views_per_day",
             title="",
             labels={
-                theme_col: f"{theme_col} (False / True)",
+                theme_col: f"{theme_display_name(theme_col).capitalize()} theme present",
                 "views_per_day": "Views per day",
             },
         )
@@ -272,7 +296,9 @@ class Viz_summaries():
             title="",
             labels={
                 "upload_year": "Year",
-                "theme_count": f"Number of videos with {theme_col}",
+                "theme_count": (
+                    f"Number of {theme_display_name(theme_col)} videos"
+                ),
             },
             markers=True,
         )
@@ -336,7 +362,9 @@ class Viz_summaries():
             title="",
             labels={
                 "upload_year": "Year",
-                "theme_count": f"Number of videos with {theme_col}",
+                "theme_count": (
+                    f"Number of {theme_display_name(theme_col)} videos"
+                ),
                 "language": "Language",
             },
         )

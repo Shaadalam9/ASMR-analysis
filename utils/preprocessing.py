@@ -7,6 +7,7 @@ from typing import Any, Dict, Optional
 from datetime import datetime, timezone
 import spacy
 
+import common
 from utils.tool import Tools
 
 logger = CustomLogger(__name__)
@@ -33,11 +34,33 @@ class Preprocessing():
             return None
         try:
             if upload_date_str.endswith("Z"):
-                return datetime.fromisoformat(upload_date_str.replace("Z", "+00:00"))
-            return datetime.fromisoformat(upload_date_str)
+                parsed = datetime.fromisoformat(upload_date_str.replace("Z", "+00:00"))
+            else:
+                parsed = datetime.fromisoformat(upload_date_str)
+            if parsed.tzinfo is None:
+                parsed = parsed.replace(tzinfo=timezone.utc)
+            return parsed.astimezone(timezone.utc)
         except Exception as exc:
             logger.warning(f"Could not parse uploadDate '{upload_date_str}': {exc}")
             return None
+
+    def parse_reference_datetime(self, value: Any) -> datetime:
+        """Return a timezone aware reference date used by all rate metrics."""
+        if isinstance(value, datetime):
+            parsed = value
+        elif isinstance(value, str) and value.strip():
+            text = value.strip()
+            if text.endswith("Z"):
+                text = text[:-1] + "+00:00"
+            parsed = datetime.fromisoformat(text)
+        else:
+            raise ValueError(
+                "analysis_reference_date must be an ISO 8601 date or datetime."
+            )
+
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=timezone.utc)
+        return parsed.astimezone(timezone.utc)
 
     def normalize_language_code(self, lang: Any) -> str:
         """Map short codes (en, jp, tl, ...) to human-readable language names."""
@@ -47,17 +70,22 @@ class Preprocessing():
             code = lang.strip().lower() or "unknown"
 
         label = tool_class.get_language_name(code)
-        if label is not None:
+        if label != "Unknown" or code == "unknown":
             return label
 
-        # Fallback: title-case whatever is left
-        return code.title()
+        # Preserve an unrecognised platform or detector code rather than
+        # silently collapsing it into the missing-language category.
+        return code
 
     def json_to_dataframe(self, data: Dict[str, Any], reference_date: Optional[datetime] = None,
                           text_source: str = "both") -> pd.DataFrame:
         """Convert the raw JSON dict into a pandas DataFrame with derived fields."""
         if reference_date is None:
-            reference_date = datetime.now(timezone.utc)
+            reference_date = self.parse_reference_datetime(
+                common.get_configs("analysis_reference_date")
+            )
+        else:
+            reference_date = self.parse_reference_datetime(reference_date)
 
         rows = []
         for video_id, info in data.items():
@@ -70,13 +98,16 @@ class Preprocessing():
             likes = info.get("likes")
             raw_language = info.get("language")
             language = self.normalize_language_code(raw_language)
+            language_source = info.get("languageSource")
             upload_date_str = info.get("uploadDate")
             channel_avg_views = info.get("channel_average_views")
+            metadata_collected_at = info.get("metadataCollectedAt")
 
             upload_dt = self._parse_upload_datetime(upload_date_str)
             if upload_dt is not None:
                 days_since_upload = (reference_date - upload_dt).total_seconds() / 86400.0
-                days_since_upload = max(days_since_upload, 1e-6)
+                if days_since_upload <= 0:
+                    days_since_upload = np.nan
             else:
                 days_since_upload = np.nan
 
@@ -86,6 +117,7 @@ class Preprocessing():
                     "title": title,
                     "description": description,
                     "language": language,
+                    "language_source": language_source,
                     "views": views,
                     "likes": likes,
                     "duration_seconds": duration,
@@ -94,6 +126,8 @@ class Preprocessing():
                     "upload_datetime": upload_dt,
                     "days_since_upload": days_since_upload,
                     "channel_average_views": channel_avg_views,
+                    "metadata_collected_at": metadata_collected_at,
+                    "analysis_reference_date": reference_date.isoformat(),
                 }
             )
 
@@ -136,18 +170,18 @@ class Preprocessing():
             np.nan,
         )
 
-        # ---- NEW: log10-transformed metrics for use in tables ----
-        df["log10_views"] = np.where(df["views"] > 0, np.log10(df["views"]), np.nan)
-        df["log10_views_per_day"] = np.where(
-            df["views_per_day"] > 0, np.log10(df["views_per_day"]), np.nan
-        )
-        df["log10_likes"] = np.where(df["likes"] > 0, np.log10(df["likes"]), np.nan)
-        df["log10_likes_per_day"] = np.where(
-            df["likes_per_day"] > 0, np.log10(df["likes_per_day"]), np.nan
-        )
-        df["log10_engagement_rate"] = np.where(
-            df["engagement_rate"] > 0, np.log10(df["engagement_rate"]), np.nan
-        )
+        def _positive_log10(series: pd.Series) -> pd.Series:
+            numeric = pd.to_numeric(series, errors="coerce")
+            result = pd.Series(np.nan, index=numeric.index, dtype=float)
+            positive = numeric > 0
+            result.loc[positive] = np.log10(numeric.loc[positive])
+            return result
+
+        df["log10_views"] = _positive_log10(df["views"])
+        df["log10_views_per_day"] = _positive_log10(df["views_per_day"])
+        df["log10_likes"] = _positive_log10(df["likes"])
+        df["log10_likes_per_day"] = _positive_log10(df["likes_per_day"])
+        df["log10_engagement_rate"] = _positive_log10(df["engagement_rate"])
 
         df["upload_year"] = df["upload_datetime"].dt.year  # type: ignore
         df["upload_month"] = df["upload_datetime"].dt.month  # type: ignore
@@ -196,11 +230,22 @@ class Preprocessing():
         return df
 
     def add_theme_flags(self, df: pd.DataFrame, model_name: str = "en_core_web_sm",
-                        text_source: str = "both") -> pd.DataFrame:
+                        text_source: str = "both", detection_mode: Optional[str] = None) -> pd.DataFrame:
         """
-        Add boolean columns for content themes using spaCy.
+        Add Boolean textual theme labels using one explicitly selected method.
+
+        The publication defaults to deterministic English lexical rules. This
+        keeps the reported analysis reproducible and avoids silently changing
+        methods according to whether a local spaCy model happens to exist.
         """
-        nlp = self.get_spacy_nlp(model_name)
+        mode = str(
+            detection_mode or common.get_configs("theme_detection_mode")
+        ).strip().lower()
+        if mode not in {"rule_based", "spacy"}:
+            raise ValueError(
+                "theme_detection_mode must be either 'rule_based' or 'spacy'."
+            )
+
         theme_cols = [
             "has_whisper",
             "has_no_talking",
@@ -220,18 +265,23 @@ class Preprocessing():
 
         texts = self.get_text_series(df, text_source=text_source).tolist()
 
-        if nlp is None:
-            logger.warning(
-                "spaCy not available; using rule-based fallback theme detection instead."
-            )
+        if mode == "rule_based":
             df = self._add_theme_flags_rule_based(df, texts, theme_cols)
+            df["theme_detection_method"] = "english_lexical_rules"
+            df["theme_rule_version"] = str(common.get_configs("theme_rule_version"))
             theme_counts = {col: int(df[col].sum()) for col in theme_cols}
             logger.info(
-                "Rule-based fallback theme flag counts "
+                "Rule-based theme flag counts "
                 f"(number of videos with flag=True): {theme_counts}"
             )
             return df
 
+        nlp = self.get_spacy_nlp(model_name)
+        if nlp is None:
+            raise RuntimeError(
+                f"Theme detection mode 'spacy' requires the '{model_name}' model. "
+                "Install the model or use theme_detection_mode='rule_based'."
+            )
 
         logger.info(
             f"Running spaCy theme detection on {len(df)} videos (text_source={text_source})"
@@ -369,6 +419,8 @@ class Preprocessing():
             df.at[idx, "has_drive"] = has_drive
 
         theme_counts = {col: int(df[col].sum()) for col in theme_cols}
+        df["theme_detection_method"] = f"spacy:{model_name}"
+        df["theme_rule_version"] = str(common.get_configs("theme_rule_version"))
         logger.info(f"Theme flag counts (number of videos with flag=True): {theme_counts}")
 
         return df

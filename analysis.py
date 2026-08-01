@@ -1,6 +1,10 @@
 from custom_logger import CustomLogger
 from logmod import logs
+import hashlib
+import importlib.metadata as importlib_metadata
+import json
 import os
+import platform
 import warnings
 from typing import Any, Dict
 
@@ -28,6 +32,12 @@ from utils.keyword_analysis import Keyword_analysis
 #   "description" -> descriptions only
 #   "both"        -> title + description
 TEXT_SOURCE = common.get_configs("analysis_text_source")
+REFERENCE_DATE = common.get_configs("analysis_reference_date")
+FORCE_RECOMPUTE = bool(common.get_configs("force_recompute"))
+RANDOM_SEED = int(common.get_configs("random_seed"))
+N_CLUSTERS = int(common.get_configs("clustering_n_clusters"))
+THEME_DETECTION_MODE = str(common.get_configs("theme_detection_mode"))
+THEME_RULE_VERSION = str(common.get_configs("theme_rule_version"))
 
 # Default scaling factor for saved PNG images.
 SCALE = 3
@@ -61,6 +71,104 @@ THEME_COLUMNS = [
     "has_visual",
     "has_drive",
 ]
+
+
+def _sha256_file(path: str) -> str:
+    """Return the SHA256 digest of a file without loading it all into memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as stream:
+        for block in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(block)
+    return digest.hexdigest()
+
+
+def _cache_matches_publication_settings(df: pd.DataFrame) -> bool:
+    """Check whether an enriched cache was built with the active settings."""
+    return (
+        str(df.attrs.get("analysis_reference_date")) == str(REFERENCE_DATE)
+        and str(df.attrs.get("theme_detection_mode")) == THEME_DETECTION_MODE
+        and str(df.attrs.get("theme_rule_version")) == THEME_RULE_VERSION
+    )
+
+
+def _stamp_publication_settings(df: pd.DataFrame) -> pd.DataFrame:
+    """Attach analysis settings that pandas preserves in pickle caches."""
+    df.attrs["analysis_reference_date"] = str(REFERENCE_DATE)
+    df.attrs["theme_detection_mode"] = THEME_DETECTION_MODE
+    df.attrs["theme_rule_version"] = THEME_RULE_VERSION
+    return df
+
+
+def write_reproducibility_manifest(json_path: str, data: Dict[str, Any], text_source: str) -> None:
+    """Save the exact data digest, analysis settings, and package versions."""
+    analysis_dir = os.path.join(common.output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
+
+    package_names = [
+        "pandas",
+        "numpy",
+        "scikit-learn",
+        "spacy",
+        "umap-learn",
+        "plotly",
+        "matplotlib",
+        "langdetect",
+        "pytubefix",
+    ]
+    package_versions = {}
+    for package_name in package_names:
+        try:
+            package_versions[package_name] = importlib_metadata.version(package_name)
+        except importlib_metadata.PackageNotFoundError:
+            package_versions[package_name] = None
+
+    metadata_timestamps = sorted(
+        str(record.get("metadataCollectedAt"))
+        for record in data.values()
+        if isinstance(record, dict) and record.get("metadataCollectedAt")
+    )
+    language_source_counts: Dict[str, int] = {}
+    for record in data.values():
+        if not isinstance(record, dict):
+            continue
+        source = str(record.get("languageSource") or "unknown")
+        language_source_counts[source] = language_source_counts.get(source, 0) + 1
+
+    record_count = len(data)
+    metadata_timestamp_count = len(metadata_timestamps)
+    language_source_unknown_count = language_source_counts.get("unknown", 0)
+    language_source_known_count = record_count - language_source_unknown_count
+
+    manifest = {
+        "dataset_file": os.path.basename(json_path),
+        "dataset_sha256": _sha256_file(json_path),
+        "video_count": record_count,
+        "analysis_reference_date": str(REFERENCE_DATE),
+        "analysis_text_source": text_source,
+        "theme_detection_mode": THEME_DETECTION_MODE,
+        "theme_rule_version": THEME_RULE_VERSION,
+        "force_recompute": FORCE_RECOMPUTE,
+        "random_seed": RANDOM_SEED,
+        "clustering_n_clusters": N_CLUSTERS,
+        "metadata_timestamp_count": metadata_timestamp_count,
+        "metadata_timestamp_coverage_percent": round(
+            100.0 * metadata_timestamp_count / record_count, 2
+        ) if record_count else 0.0,
+        "metadata_timestamp_min": metadata_timestamps[0] if metadata_timestamps else None,
+        "metadata_timestamp_max": metadata_timestamps[-1] if metadata_timestamps else None,
+        "language_source_counts": language_source_counts,
+        "language_source_known_count": language_source_known_count,
+        "language_source_unknown_count": language_source_unknown_count,
+        "language_source_coverage_percent": round(
+            100.0 * language_source_known_count / record_count, 2
+        ) if record_count else 0.0,
+        "python_version": platform.python_version(),
+        "package_versions": package_versions,
+    }
+    manifest_path = os.path.join(analysis_dir, "reproducibility_manifest.json")
+    with open(manifest_path, "w", encoding="utf-8") as stream:
+        json.dump(manifest, stream, indent=2, sort_keys=True)
+    logger.info(f"Reproducibility manifest saved to {manifest_path}")
 
 
 def _coerce_bool_theme_series(series: pd.Series) -> pd.Series:
@@ -111,9 +219,27 @@ def _ensure_theme_flags_are_valid(df: pd.DataFrame, text_source: str, enriched_p
     counts = _theme_flag_counts(df)
     logger.info("Theme flag counts before validation:\n" + counts.to_string(index=False))
 
-    should_refresh = bool(missing_before) or (int(counts["true_count"].sum()) == 0 and len(df) > 0)
+    expected_method = (
+        "english_lexical_rules"
+        if THEME_DETECTION_MODE == "rule_based"
+        else "spacy:en_core_web_sm"
+    )
+    method_mismatch = (
+        "theme_detection_method" not in df.columns
+        or "theme_rule_version" not in df.columns
+        or not df["theme_detection_method"].astype(str).eq(expected_method).all()
+        or not df["theme_rule_version"].astype(str).eq(THEME_RULE_VERSION).all()
+    )
+    should_refresh = (
+        FORCE_RECOMPUTE
+        or bool(missing_before)
+        or method_mismatch
+        or (int(counts["true_count"].sum()) == 0 and len(df) > 0)
+    )
     if should_refresh:
-        if missing_before:
+        if FORCE_RECOMPUTE:
+            logger.info("Recomputing theme labels because force_recompute is enabled.")
+        elif missing_before:
             logger.warning(
                 "The cached enriched dataset is missing theme columns: "
                 f"{missing_before}. Refreshing theme detection from the text columns."
@@ -125,8 +251,13 @@ def _ensure_theme_flags_are_valid(df: pd.DataFrame, text_source: str, enriched_p
                 "worked, or spaCy was unavailable."
             )
 
-        df = pre_process_class.add_theme_flags(df, text_source=text_source)
+        df = pre_process_class.add_theme_flags(
+            df,
+            text_source=text_source,
+            detection_mode=THEME_DETECTION_MODE,
+        )
         df = _coerce_theme_columns(df)
+        df = _stamp_publication_settings(df)
         counts = _theme_flag_counts(df)
         logger.info("Theme flag counts after refresh:\n" + counts.to_string(index=False))
         df.to_pickle(enriched_pickle)
@@ -569,14 +700,31 @@ def run_elbow_analysis(text_source: str = "both") -> None:
 
     # Try to load the enriched DataFrame from disk; if not present,
     # build it from the raw JSON file using the preprocessing utilities.
-    if os.path.isfile(enriched_pickle):
+    if os.path.isfile(enriched_pickle) and not FORCE_RECOMPUTE:
         logger.info(f"Loading enriched dataset from pickle {enriched_pickle}")
         df = pd.read_pickle(enriched_pickle)
+        if not _cache_matches_publication_settings(df):
+            logger.info("Cached enriched dataset uses different analysis settings; rebuilding it.")
+            data = pre_process_class.load_asmr_data(
+                os.path.join(common.get_configs("data"), "asmr_results.json")
+            )
+            df = pre_process_class.json_to_dataframe(
+                data,
+                reference_date=pre_process_class.parse_reference_datetime(REFERENCE_DATE),
+                text_source=text_source,
+            )
+            df = _stamp_publication_settings(df)
+            df.to_pickle(enriched_pickle)
     else:
         logger.info("No enriched pickle found; building DataFrame from JSON...")
-        json_path = common.get_configs("asmr_json_path")
+        json_path = os.path.join(common.get_configs("data"), "asmr_results.json")
         data = pre_process_class.load_asmr_data(json_path)
-        df = pre_process_class.json_to_dataframe(data, text_source=text_source)
+        df = pre_process_class.json_to_dataframe(
+            data,
+            reference_date=pre_process_class.parse_reference_datetime(REFERENCE_DATE),
+            text_source=text_source,
+        )
+        df = _stamp_publication_settings(df)
 
     # Backfill likes_per_day for older pickles if needed. Some historical
     # cached datasets may be missing this derived column, so we recompute
@@ -599,6 +747,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
         df,
         k_values,
         text_source=text_source,
+        random_state=RANDOM_SEED,
     )
 
     # Log a neatly formatted summary of the elbow results. The logged
@@ -854,18 +1003,33 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
 def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> None:
     """Run all analytics, write CSVs into output/analysis, and create Plotly figures."""
     analysis_dir = os.path.join(common.output_dir, "analysis")
+    os.makedirs(analysis_dir, exist_ok=True)
 
     enriched_pickle = os.path.join(
         analysis_dir,
         f"asmr_videos_enriched_{text_source}.pkl",
     )
 
-    if os.path.isfile(enriched_pickle):
+    if os.path.isfile(enriched_pickle) and not FORCE_RECOMPUTE:
         logger.info(f"Loading enriched dataset from pickle {enriched_pickle}")
         df = pd.read_pickle(enriched_pickle)
+        if not _cache_matches_publication_settings(df):
+            logger.info("Cached enriched dataset uses different analysis settings; rebuilding it.")
+            df = pre_process_class.json_to_dataframe(
+                data,
+                reference_date=pre_process_class.parse_reference_datetime(REFERENCE_DATE),
+                text_source=text_source,
+            )
+            df = _stamp_publication_settings(df)
+            df.to_pickle(enriched_pickle)
     else:
         logger.info("No enriched pickle found; building DataFrame from JSON...")
-        df = pre_process_class.json_to_dataframe(data, text_source=text_source)
+        df = pre_process_class.json_to_dataframe(
+            data,
+            reference_date=pre_process_class.parse_reference_datetime(REFERENCE_DATE),
+            text_source=text_source,
+        )
+        df = _stamp_publication_settings(df)
         logger.info(f"Saving enriched dataset to pickle {enriched_pickle}")
         df.to_pickle(enriched_pickle)
 
@@ -985,7 +1149,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         f"asmr_videos_with_clusters_{text_source}.pkl",
     )
 
-    if os.path.isfile(cluster_pickle):
+    if os.path.isfile(cluster_pickle) and not FORCE_RECOMPUTE:
         logger.info(f"Loading clustered dataset from pickle {cluster_pickle}")
         clustered_df = pd.read_pickle(cluster_pickle)
         pipeline = None
@@ -993,7 +1157,10 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
     else:
         logger.info("No clustered pickle found; running KMeans clustering...")
         clustered_df, pipeline, pca_info = clustering_class.cluster_videos(
-            df, n_clusters=11, text_source=text_source
+            df,
+            n_clusters=N_CLUSTERS,
+            random_state=RANDOM_SEED,
+            text_source=text_source,
         )
         logger.info(f"Saving clustered dataset to pickle {cluster_pickle}")
         clustered_df.to_pickle(cluster_pickle)
@@ -1091,7 +1258,7 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
         )
 
         recompute_umap = True
-        if os.path.isfile(umap_cluster_pickle):
+        if os.path.isfile(umap_cluster_pickle) and not FORCE_RECOMPUTE:
             logger.info(f"Loading full UMAP clustered dataset from pickle {umap_cluster_pickle}")
             clustered_umap_df = pd.read_pickle(umap_cluster_pickle)
             if {"embedding_x", "embedding_y"}.issubset(clustered_umap_df.columns):
@@ -1116,7 +1283,8 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
             )
             clustered_umap_df, umap_pipeline = clustering_class.cluster_videos_umap(
                 df,
-                n_clusters=11,
+                n_clusters=N_CLUSTERS,
+                random_state=RANDOM_SEED,
                 text_source=text_source,
                 umap_n_neighbors=umap_n_neighbors,
                 umap_min_dist=umap_min_dist,
@@ -1172,6 +1340,7 @@ def main() -> None:
 
     analysis_dir = os.path.join(common.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
+    write_reproducibility_manifest(json_path, data, TEXT_SOURCE)
 
     # Always generate wordclouds for title, description, and both
     for src in ["title", "description", "both"]:
@@ -1186,6 +1355,7 @@ def main() -> None:
             text_source=src,
             model_name="en_core_web_sm",
             top_k=200,
+            use_cache=not FORCE_RECOMPUTE,
         )
 
     keyword_pickle = os.path.join(
@@ -1193,7 +1363,7 @@ def main() -> None:
         f"spacy_keywords_{TEXT_SOURCE}.pkl",
     )
 
-    if os.path.isfile(keyword_pickle):
+    if os.path.isfile(keyword_pickle) and not FORCE_RECOMPUTE:
         logger.info(f"Loading spaCy keyword counts from pickle {keyword_pickle}")
         keyword_df = pd.read_pickle(keyword_pickle)
     else:

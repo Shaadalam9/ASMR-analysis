@@ -196,7 +196,9 @@ def _empty_metadata(status: str = "placeholder") -> Dict[str, Any]:
         "description": None,
         "uploadDate": None,
         "language": None,
+        "languageSource": None,
         "channel_average_views": None,
+        "metadataCollectedAt": None,
         "recovery_status": status,
     }
 
@@ -470,7 +472,12 @@ def _save_checkpoint(path: str, data: Dict[str, Dict[str, Any]]) -> None:
 # Secrets and API helpers
 # -----------------------------------------------------------------------------
 def _load_api_keys_from_secrets() -> List[str]:
-    raw = common.get_secrets("google-api-keys") or common.get_secrets("google-api-key")
+    raw = (
+        os.environ.get("YOUTUBE_API_KEYS")
+        or os.environ.get("YOUTUBE_API_KEY")
+        or common.get_secrets("google-api-keys")
+        or common.get_secrets("google-api-key")
+    )
     keys: List[str] = []
 
     if not raw:
@@ -585,11 +592,21 @@ def _metadata_from_api_item(item: Dict[str, Any]) -> Dict[str, Any]:
 
     title = snippet.get("title")
     description = snippet.get("description")
-    default_language = snippet.get("defaultAudioLanguage") or snippet.get("defaultLanguage")
+    default_audio_language = snippet.get("defaultAudioLanguage")
+    default_language = snippet.get("defaultLanguage")
 
-    language = default_language
+    language = default_audio_language or default_language
     if not language:
         language = _detect_language("{} {}".format(title or "", description or ""))
+
+    if default_audio_language:
+        language_source = "youtube:defaultAudioLanguage"
+    elif default_language:
+        language_source = "youtube:defaultLanguage"
+    elif language:
+        language_source = "langdetect:title_description"
+    else:
+        language_source = None
 
     return {
         "title": title,
@@ -601,7 +618,9 @@ def _metadata_from_api_item(item: Dict[str, Any]) -> Dict[str, Any]:
         "description": description,
         "uploadDate": snippet.get("publishedAt"),
         "language": language,
+        "languageSource": language_source,
         "channel_average_views": None,
+        "metadataCollectedAt": _now_stamp(),
         "recovery_status": "recovered_from_api",
     }
 

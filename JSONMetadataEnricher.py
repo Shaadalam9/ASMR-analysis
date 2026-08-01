@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import os
+import datetime
 from typing import Any, Dict, Optional, Tuple
 
 from googleapiclient.discovery import build  # type: ignore
@@ -69,9 +70,16 @@ class JSONMetadataEnricher:
 
         # In-memory cache to avoid repeated channel stats calls.
         self._channel_stats_cache: Dict[str, Optional[float]] = {}
+        self._video_stats_cache: Dict[str, Dict[str, Optional[int]]] = {}
 
         # Flag: once quotaExceeded happens on channel stats, stop further calls this run.
         self._channel_stats_quota_exceeded: bool = False
+
+    def _metadata_timestamp(self) -> str:
+        """Return the UTC time at which metadata were retrieved or refreshed."""
+        return datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
 
     # -------------------------------------------------------------------------
     # Core helpers
@@ -82,8 +90,6 @@ class JSONMetadataEnricher:
             return None
 
         try:
-            import datetime
-
             if isinstance(val, (datetime.date, datetime.datetime)):
                 return val.isoformat()
         except Exception:
@@ -197,6 +203,9 @@ class JSONMetadataEnricher:
     # -------------------------------------------------------------------------
     def _fetch_video_stats_api(self, video_id: str) -> Dict[str, Optional[int]]:
         """Fetch video statistics (views, likes) via YouTube Data API."""
+        if video_id in self._video_stats_cache:
+            return self._video_stats_cache[video_id]
+
         if not self.youtube:
             return {"views": None, "likes": None}
 
@@ -212,7 +221,9 @@ class JSONMetadataEnricher:
             stats = items[0].get("statistics", {})
             view_count = self._normalize_int(stats.get("viewCount"))
             like_count = self._normalize_int(stats.get("likeCount"))
-            return {"views": view_count, "likes": like_count}
+            result = {"views": view_count, "likes": like_count}
+            self._video_stats_cache[video_id] = result
+            return result
         except Exception:
             self.logger.warning(
                 "Failed to fetch video statistics via API for video {}; keeping existing views/likes".format(
@@ -220,6 +231,51 @@ class JSONMetadataEnricher:
                 )
             )
             return {"views": None, "likes": None}
+
+    def _prefetch_video_stats_api(self, video_ids: list[str]) -> None:
+        """Fetch views and likes in API batches of at most 50 identifiers."""
+        if not self.youtube or not video_ids:
+            return
+
+        for start in range(0, len(video_ids), 50):
+            batch = video_ids[start:start + 50]
+            try:
+                response = self.youtube.videos().list(  # type: ignore[call-arg]
+                    part="statistics",
+                    id=",".join(batch),
+                    maxResults=len(batch),
+                ).execute()
+            except Exception as exc:
+                self.logger.warning(
+                    "Failed to fetch a batch of video statistics: {}".format(exc)
+                )
+                continue
+
+            returned_ids = set()
+            for item in response.get("items", []):
+                video_id = str(item.get("id") or "")
+                if not video_id:
+                    continue
+                returned_ids.add(video_id)
+                stats = item.get("statistics", {}) or {}
+                self._video_stats_cache[video_id] = {
+                    "views": self._normalize_int(stats.get("viewCount")),
+                    "likes": self._normalize_int(stats.get("likeCount")),
+                }
+
+            for video_id in batch:
+                if video_id not in returned_ids:
+                    self._video_stats_cache[video_id] = {
+                        "views": None,
+                        "likes": None,
+                    }
+
+            self.logger.info(
+                "Prefetched statistics for {} / {} videos.".format(
+                    min(start + len(batch), len(video_ids)),
+                    len(video_ids),
+                )
+            )
 
     # -------------------------------------------------------------------------
     # pytubefix metadata helper
@@ -237,6 +293,7 @@ class JSONMetadataEnricher:
             return {
                 "uploadDate": None,
                 "language": None,
+                "languageSource": None,
                 "description": None,
                 "title": None,
                 "channelId": None,
@@ -244,6 +301,7 @@ class JSONMetadataEnricher:
                 "views": None,
                 "likes": None,
                 "duration": None,
+                "metadataCollectedAt": None,
             }
 
         title = getattr(yt, "title", None)
@@ -265,6 +323,7 @@ class JSONMetadataEnricher:
         return {
             "uploadDate": upload_date,
             "language": language,
+            "languageSource": "langdetect:title_description" if language else None,
             "description": description,
             "title": title,
             "channelId": channel_id,
@@ -272,6 +331,7 @@ class JSONMetadataEnricher:
             "views": views,
             "likes": likes,
             "duration": duration,
+            "metadataCollectedAt": self._metadata_timestamp(),
         }
 
     # NEW: dedicated helper for *new* IDs from seen_videos_id.txt
@@ -327,6 +387,7 @@ class JSONMetadataEnricher:
         meta = {
             "uploadDate": upload_date,
             "language": language,
+            "languageSource": "langdetect:title_description" if language else None,
             "description": description,
             "title": title,
             "channelId": channel_id,
@@ -334,6 +395,7 @@ class JSONMetadataEnricher:
             "views": views,
             "likes": likes,
             # duration will be fetched later if needed
+            "metadataCollectedAt": self._metadata_timestamp(),
         }
         return meta, False
 
@@ -454,7 +516,9 @@ class JSONMetadataEnricher:
                 "description": meta.get("description"),
                 "uploadDate": meta.get("uploadDate"),
                 "language": meta.get("language"),
+                "languageSource": meta.get("languageSource"),
                 "channel_average_views": None,
+                "metadataCollectedAt": meta.get("metadataCollectedAt"),
             }
             json_ids.add(vid)
             self.logger.info(
@@ -584,6 +648,10 @@ class JSONMetadataEnricher:
                     language = self._detect_language(combined_text)
 
             meta["language"] = language
+            if language:
+                meta["languageSource"] = (
+                    extra.get("languageSource") if extra else None
+                ) or "langdetect:title_description"
 
         # --- views & likes: API preferred, pytubefix fallback; never overwrite unless flag says so ---
         stats: Dict[str, Optional[int]] = {"views": None, "likes": None}
@@ -617,6 +685,8 @@ class JSONMetadataEnricher:
                     channel_id
                 )
 
+        meta["metadataCollectedAt"] = self._metadata_timestamp()
+
     def enrich_json(self) -> None:
         """Main entry point to enrich the JSON file."""
         data = self._load_json()
@@ -631,6 +701,12 @@ class JSONMetadataEnricher:
         self.logger.info(
             "Loaded {} video entries from '{}' after sync.".format(total, self.json_path)
         )
+
+        if self.update_views_likes:
+            self.logger.info(
+                "Refreshing video statistics in batches of up to 50 identifiers."
+            )
+            self._prefetch_video_stats_api(list(data.keys()))
 
         for idx, (video_id, meta) in enumerate(data.items(), start=1):
             try:
@@ -656,7 +732,10 @@ class JSONMetadataEnricher:
 # -------------------------------------------------------------------------
 if __name__ == "__main__":
     # Get API key (may be None/empty; then channel_average_views & API stats may stay None).
-    secret_api = common.get_secrets("google-api-key")
+    secret_api = (
+        os.environ.get("YOUTUBE_API_KEY")
+        or common.get_secrets("google-api-keys")
+    )
 
     # Resolve data folder and JSON filename from configs.
     data_folder = common.get_configs("data")
@@ -668,7 +747,7 @@ if __name__ == "__main__":
     enricher = JSONMetadataEnricher(
         api_key=secret_api,  # type: ignore
         json_path=json_path,
-        update_views_likes=False,         # set True to refresh views/likes even when present
+        update_views_likes=bool(common.get_configs("refresh_existing_statistics")),
         force_refresh_channel_avg=False,  # set True to recompute channel_average_views even when present
     )
     enricher.enrich_json()

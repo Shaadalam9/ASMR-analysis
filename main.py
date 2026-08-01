@@ -10,7 +10,7 @@ It supports two discovery mechanisms:
 2. pytubefix contrib Search (web scraping; no API key required).
 
 Key features:
-    * Excludes YouTube Shorts (videos < 60 seconds).
+    * Excludes videos shorter than 59 seconds.
     * Enriches videos with pytubefix metadata:
         - title
         - duration
@@ -274,8 +274,16 @@ class ASMRFetcher:
             "description": None,
             "uploadDate": None,
             "language": None,
+            "languageSource": None,
             "channel_average_views": None,
+            "metadataCollectedAt": None,
         }
+
+    def _metadata_timestamp(self) -> str:
+        """Return the UTC time at which a metadata record was retrieved."""
+        return datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+            "+00:00", "Z"
+        )
 
     def _normalize_published_bound(self, value: Optional[str]) -> Optional[str]:
         """
@@ -290,7 +298,7 @@ class ASMRFetcher:
             return None
 
         v = value.strip()
-        if not v or v.lower() == "none":
+        if not v or v.lower() in {"none", "null", "yyyy-mm-dd"}:
             return None
 
         if re.fullmatch(r"\d{4}-\d{2}-\d{2}", v):
@@ -390,8 +398,8 @@ class ASMRFetcher:
         return 0
 
     def _is_short_video(self, seconds: int) -> bool:
-        """Determine whether a video should be considered a YouTube Short."""
-        return seconds < 60
+        """Return True when a video is below the study threshold of 59 seconds."""
+        return seconds < 59
 
     # -------------------------------------------------------------------------
     # Metadata normalization helpers
@@ -565,7 +573,9 @@ class ASMRFetcher:
                 "description": description,
                 "uploadDate": upload_date,
                 "language": language,
+                "languageSource": "langdetect:title_description" if language else None,
                 "channel_average_views": None,
+                "metadataCollectedAt": self._metadata_timestamp(),
             }
 
         except pytube_exceptions.BotDetection:
@@ -618,6 +628,11 @@ class ASMRFetcher:
         if not meta.get("language"):
             combined_text = (meta.get("title", "") or "") + " " + (meta.get("description", "") or "")
             meta["language"] = self._detect_language(combined_text)
+            if meta.get("language"):
+                meta["languageSource"] = "langdetect:title_description"
+
+        if not meta.get("metadataCollectedAt"):
+            meta["metadataCollectedAt"] = self._metadata_timestamp()
 
         if ("channel_average_views" not in meta) or (meta.get("channel_average_views") is None):
             channel_id = meta.get("channelId")
@@ -695,16 +710,12 @@ class ASMRFetcher:
                 title = snippet["title"]
                 upload_date_api = snippet.get("publishedAt")
 
-                default_lang = snippet.get("defaultAudioLanguage") or snippet.get(
-                    "defaultLanguage"
-                )
-
                 if video_id in seen_ids_set:
                     continue
 
                 try:
                     details = self.youtube.videos().list(  # type: ignore[call-arg]
-                        part="contentDetails",
+                        part="snippet,contentDetails,statistics",
                         id=video_id,
                     ).execute()
                 except Exception as exc:  # noqa: BLE001
@@ -725,7 +736,10 @@ class ASMRFetcher:
                 if not details.get("items"):
                     continue
 
-                content_details = details["items"][0].get("contentDetails", {})
+                detail_item = details["items"][0]
+                content_details = detail_item.get("contentDetails", {})
+                video_snippet = detail_item.get("snippet", {})
+                video_statistics = detail_item.get("statistics", {})
                 iso_duration = content_details.get("duration", "P0D")
                 duration_seconds = self._duration_to_seconds(iso_duration)
 
@@ -735,6 +749,17 @@ class ASMRFetcher:
                 meta = self._fetch_video_metadata_pytubefix(video_id)
                 if not meta.get("duration"):
                     meta["duration"] = duration_seconds
+
+                if not meta.get("description"):
+                    meta["description"] = video_snippet.get("description")
+                if not meta.get("channelId"):
+                    meta["channelId"] = video_snippet.get("channelId")
+                if not meta.get("author"):
+                    meta["author"] = video_snippet.get("channelTitle")
+                if meta.get("views") is None:
+                    meta["views"] = self._normalize_int(video_statistics.get("viewCount"))
+                if meta.get("likes") is None:
+                    meta["likes"] = self._normalize_int(video_statistics.get("likeCount"))
 
                 if not self._contains_query_keyword(
                     title, meta.get("description") or ""
@@ -747,8 +772,18 @@ class ASMRFetcher:
                 if not self._passes_date_filter(final_upload_date):
                     continue
 
+                default_audio_language = video_snippet.get("defaultAudioLanguage")
+                default_language = video_snippet.get("defaultLanguage")
                 meta_language = meta.get("language")
-                final_language = default_lang or meta_language
+                final_language = default_audio_language or default_language or meta_language
+                if default_audio_language:
+                    language_source = "youtube:defaultAudioLanguage"
+                elif default_language:
+                    language_source = "youtube:defaultLanguage"
+                elif meta_language:
+                    language_source = meta.get("languageSource") or "langdetect:title_description"
+                else:
+                    language_source = None
 
                 channel_id = meta.get("channelId")
                 if channel_id:
@@ -771,7 +806,9 @@ class ASMRFetcher:
                         "description": meta.get("description"),
                         "uploadDate": final_upload_date,
                         "language": final_language,
+                        "languageSource": language_source,
                         "channel_average_views": channel_avg_views,
+                        "metadataCollectedAt": self._metadata_timestamp(),
                     }
                 )
 
@@ -902,7 +939,9 @@ class ASMRFetcher:
                     "description": meta.get("description"),
                     "uploadDate": upload_date,
                     "language": meta.get("language"),
+                    "languageSource": meta.get("languageSource"),
                     "channel_average_views": channel_avg_views,
+                    "metadataCollectedAt": self._metadata_timestamp(),
                 }
             )
 
@@ -1299,7 +1338,9 @@ def _load_api_keys_from_secrets() -> List[str]:
         - google-api-keys: list or comma/semicolon separated string
         - google-api-key: single key (fallback)
     """
-    raw = common.get_secrets("google-api-keys") or common.get_secrets("google-api-key")
+    raw = (
+        common.get_secrets("google-api-keys")
+    )
     keys: List[str] = []
 
     if not raw:
@@ -1333,9 +1374,16 @@ if __name__ == "__main__":
 
     raw_window = common.get_configs("date_window_months")
     window_months = _coerce_int(raw_window) or 0
+    configured_start = _parse_date_only(common.get_configs("date_before"))
+    configured_end = _parse_date_only(common.get_configs("date_after"))
+    windowing_enabled = (
+        window_months > 0
+        and configured_start is not None
+        and configured_end is not None
+    )
 
-    # 1) No windowing configured → behave like a simple one-shot script.
-    if window_months <= 0:
+    # 1) No complete windowing configuration → use one bounded or unbounded run.
+    if not windowing_enabled:
         date_before_cfg, date_after_cfg, _ = _compute_date_bounds_with_window()
         fetcher = ASMRFetcher(
             api_keys=secret.API_KEYS,

@@ -77,6 +77,7 @@ class Plots():
                            scale: int = SCALE, save_final: bool = True, save_png: bool = True,
                            save_eps: bool = True, auto_open: bool = True) -> None:
         """Save a Plotly figure as HTML, PNG, and EPS formats."""
+        auto_open = bool(auto_open and common.get_configs("auto_open_plots"))
         output_final = os.path.join(common.root_dir, "figures")
         os.makedirs(common.output_dir, exist_ok=True)
         os.makedirs(output_final, exist_ok=True)
@@ -382,9 +383,10 @@ class Plots():
         plt.close(fig)
 
         # Try to auto-open the HTML file in the default browser
-        try:
-            abs_html = os.path.abspath(html_path)
-            webbrowser.open(f"file://{abs_html}", new=2)
-            logger.info(f"Opened HTML for {filename} at {abs_html}")
-        except Exception as exc:
-            logger.warning(f"Could not auto-open HTML for {filename}: {exc}")
+        if common.get_configs("auto_open_plots"):
+            try:
+                abs_html = os.path.abspath(html_path)
+                webbrowser.open(f"file://{abs_html}", new=2)
+                logger.info(f"Opened HTML for {filename} at {abs_html}")
+            except Exception as exc:
+                logger.warning(f"Could not auto-open HTML for {filename}: {exc}")
