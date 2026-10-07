@@ -35,7 +35,7 @@ class Summaries():
         )
 
         agg = (
-            df_copy.groupby("duration_bucket")
+            df_copy.groupby("duration_bucket", observed=False)
             .agg(
                 video_count=("video_id", "count"),
 
@@ -126,7 +126,7 @@ class Summaries():
         )
 
         agg = (
-            df_copy.groupby("title_length_bucket")
+            df_copy.groupby("title_length_bucket", observed=False)
             .agg(
                 video_count=("video_id", "count"),
                 mean_views=("views", "mean"),

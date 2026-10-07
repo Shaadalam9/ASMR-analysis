@@ -1,4 +1,3 @@
-# -*- coding: utf-8 -*-
 """Keyword-based YouTube video fetcher with metadata enrichment.
 
 This module discovers videos on YouTube for a given query, filters
@@ -93,24 +92,25 @@ Author:
 
 from __future__ import annotations
 
+import calendar
+import datetime
 import json
 import os
-import re
 import random
+import re
 import shutil
-import datetime
-import calendar
 from types import SimpleNamespace
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any
 
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
-from pytubefix import YouTube, exceptions as pytube_exceptions
+from pytubefix import YouTube
+from pytubefix import exceptions as pytube_exceptions
 from pytubefix.contrib.search import Filter, Search
 
-from logmod import logs
 import common
 from custom_logger import CustomLogger
+from logmod import logs
 
 # Make langdetect deterministic (otherwise results can vary run-to-run).
 DetectorFactory.seed = 0
@@ -123,19 +123,34 @@ logs(show_level=common.get_configs("logger_level"), show_color=True)
 logger = CustomLogger(__name__)
 
 
+def _is_quota_error(exc: Exception) -> bool:
+    """True for YouTube Data API quota/rate-limit errors (HTTP 429 or quota reasons)."""
+    status = getattr(getattr(exc, "resp", None), "status", None)
+    text = str(exc)
+    return (
+        status == 429
+        or any(t in text for t in ("quotaExceeded", "Quota exceeded", "rateLimitExceeded", "dailyLimitExceeded"))
+    )
+
+
+def _safe_exc_text(exc: Exception) -> str:
+    """Exception text with API keys removed so they never reach the logs."""
+    return re.sub(r"key=[^&\s\"']+", "key=REDACTED", str(exc))[:300]
+
+
 class ASMRFetcher:
     """Fetch, enrich, and persist query-related videos from YouTube."""
 
     def __init__(
         self,
-        api_keys: Optional[List[str]] = None,
+        api_keys: list[str] | None = None,
         query: str = "ASMR",
         max_pages: int = 100,
         results_per_page: int = 50,
         seen_file: str = "seen_video_ids.txt",
         json_output: str = "asmr_results.json",
-        published_before: Optional[str] = None,
-        published_after: Optional[str] = None,
+        published_before: str | None = None,
+        published_after: str | None = None,
     ) -> None:
         """Initialize ASMRFetcher."""
         # Core configs
@@ -156,14 +171,15 @@ class ASMRFetcher:
 
         # Multiple API keys support
         raw_keys = api_keys or []
-        self.api_keys: List[str] = [k for k in raw_keys if k]
+        self.api_keys: list[str] = [k for k in raw_keys if k]
         self._current_key_index: int = 0
         self.youtube = None
 
         # Caches / flags
-        self._channel_stats_cache: Dict[str, Optional[float]] = {}
+        self._channel_stats_cache: dict[str, float | None] = {}
         self._channel_stats_quota_exceeded: bool = False
         self._pytube_disabled: bool = False
+        self._api_search_failed: bool = False
 
         # Initialize YouTube client (if any API key exists)
         if self.api_keys:
@@ -262,7 +278,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Small helpers
     # -------------------------------------------------------------------------
-    def _empty_video_metadata(self) -> Dict[str, Any]:
+    def _empty_video_metadata(self) -> dict[str, Any]:
         """Return an empty/default metadata dict for a video."""
         return {
             "title": None,
@@ -281,11 +297,11 @@ class ASMRFetcher:
 
     def _metadata_timestamp(self) -> str:
         """Return the UTC time at which a metadata record was retrieved."""
-        return datetime.datetime.now(datetime.timezone.utc).isoformat().replace(
+        return datetime.datetime.now(datetime.UTC).isoformat().replace(
             "+00:00", "Z"
         )
 
-    def _normalize_published_bound(self, value: Optional[str]) -> Optional[str]:
+    def _normalize_published_bound(self, value: str | None) -> str | None:
         """
         Normalize a user-provided date bound (publishedBefore/After) to RFC3339.
 
@@ -322,7 +338,7 @@ class ASMRFetcher:
         except Exception:
             return None
 
-    def _passes_date_filter(self, upload_date: Optional[str]) -> bool:
+    def _passes_date_filter(self, upload_date: str | None) -> bool:
         """
         Return True if the video with the given upload_date should be kept
         under the current published_before / published_after filters.
@@ -341,11 +357,11 @@ class ASMRFetcher:
             return True
 
         if up_dt.tzinfo is not None:
-            up_dt = up_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            up_dt = up_dt.astimezone(datetime.UTC).replace(tzinfo=None)
         if pb_dt is not None and pb_dt.tzinfo is not None:
-            pb_dt = pb_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            pb_dt = pb_dt.astimezone(datetime.UTC).replace(tzinfo=None)
         if pa_dt is not None and pa_dt.tzinfo is not None:
-            pa_dt = pa_dt.astimezone(datetime.timezone.utc).replace(tzinfo=None)
+            pa_dt = pa_dt.astimezone(datetime.UTC).replace(tzinfo=None)
 
         if pb_dt is None and pa_dt is not None:
             return up_dt > pa_dt
@@ -426,7 +442,7 @@ class ASMRFetcher:
             return int(s) if s.isdigit() else 0
         return 0
 
-    def _normalize_upload_date(self, val: Any) -> Optional[str]:
+    def _normalize_upload_date(self, val: Any) -> str | None:
         """Normalize upload date to a string, if possible."""
         if val is None:
             return None
@@ -445,7 +461,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Language detection helper
     # -------------------------------------------------------------------------
-    def _detect_language(self, text: str) -> Optional[str]:
+    def _detect_language(self, text: str) -> str | None:
         """Detect the language of the given text using langdetect."""
         text = (text or "").strip()
         if not text:
@@ -458,7 +474,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Channel statistics helper
     # -------------------------------------------------------------------------
-    def _fetch_channel_average_views(self, channel_id: str) -> Optional[float]:
+    def _fetch_channel_average_views(self, channel_id: str) -> float | None:
         """Fetch average views per video for a given channel using the YouTube Data API."""
         if not channel_id:
             return None
@@ -497,7 +513,7 @@ class ASMRFetcher:
             return avg
 
         except Exception as exc:  # noqa: BLE001
-            if "quotaExceeded" in str(exc):
+            if _is_quota_error(exc):
                 logger.warning(
                     "YouTube channel statistics quota exceeded for current key."
                 )
@@ -518,7 +534,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # pytubefix metadata helpers
     # -------------------------------------------------------------------------
-    def _fetch_video_metadata_pytubefix(self, video_id: str) -> Dict[str, Any]:
+    def _fetch_video_metadata_pytubefix(self, video_id: str) -> dict[str, Any]:
         """Fetch basic video metadata via pytubefix (defensive, BotDetection-aware)."""
         if self._pytube_disabled:
             return self._empty_video_metadata()
@@ -591,7 +607,7 @@ class ASMRFetcher:
             )
             return self._empty_video_metadata()
 
-    def _ensure_metadata_for_item(self, video_id: str, meta: Dict[str, Any]) -> None:
+    def _ensure_metadata_for_item(self, video_id: str, meta: dict[str, Any]) -> None:
         """Ensure that a video metadata dictionary is fully populated."""
         required_fields = [
             "title",
@@ -607,9 +623,7 @@ class ASMRFetcher:
         def _is_missing(val: Any) -> bool:
             if val is None:
                 return True
-            if isinstance(val, str) and val.strip() == "":
-                return True
-            return False
+            return isinstance(val, str) and val.strip() == ""
 
         needs_fetch = any(
             (field not in meta) or _is_missing(meta.get(field))
@@ -654,20 +668,20 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Discovery via YouTube Data API (with multi-key rotation)
     # -------------------------------------------------------------------------
-    def _discover_with_api(self, seen_ids_set: set[str], seen_ids_list: List[str]) -> List[Dict[str, Any]]:
+    def _discover_with_api(self, seen_ids_set: set[str], seen_ids_list: list[str]) -> list[dict[str, Any]]:
         """Discover new relevant videos using the YouTube Data API."""
-        if self.youtube is None:
+        if self.youtube is None or self._api_search_failed:
             return []
 
-        new_items: List[Dict[str, Any]] = []
-        next_page_token: Optional[str] = None
+        new_items: list[dict[str, Any]] = []
+        next_page_token: str | None = None
 
         for _ in range(self.max_pages):
             if self.youtube is None:
                 break
 
             try:
-                search_params: Dict[str, Any] = {
+                search_params: dict[str, Any] = {
                     "q": self.query,
                     "part": "snippet",
                     "type": "video",
@@ -687,7 +701,7 @@ class ASMRFetcher:
                 )
                 response = request.execute()
             except Exception as exc:  # noqa: BLE001
-                if "quotaExceeded" in str(exc):
+                if _is_quota_error(exc):
                     logger.warning(
                         "YouTube search quota exceeded for current key; attempting to switch API key."
                     )
@@ -700,8 +714,10 @@ class ASMRFetcher:
                         )
                         break
                 logger.warning(
-                    "YouTube Data API search failed; skipping further API search calls this run."
+                    f"YouTube Data API search failed ({type(exc).__name__}: {_safe_exc_text(exc)}); "
+                    "skipping further API search calls this run."
                 )
+                self._api_search_failed = True
                 break
 
             for item in response.get("items", []):
@@ -719,7 +735,7 @@ class ASMRFetcher:
                         id=video_id,
                     ).execute()
                 except Exception as exc:  # noqa: BLE001
-                    if "quotaExceeded" in str(exc):
+                    if _is_quota_error(exc):
                         logger.warning(
                             "YouTube videos().list quota exceeded for current key; attempting to switch API key."
                         )
@@ -822,11 +838,16 @@ class ASMRFetcher:
         random.shuffle(new_items)
         return new_items
 
+    def discovery_exhausted(self) -> bool:
+        """True when neither the Data API nor pytubefix can discover videos for the rest of this run."""
+        api_unavailable = self.youtube is None or self._api_search_failed
+        return api_unavailable and self._pytube_disabled
+
     # -------------------------------------------------------------------------
     # Discovery via pytubefix Search
     # -------------------------------------------------------------------------
     def _discover_with_pytubefix_search(self, seen_ids_set: set[str],
-                                        seen_ids_list: List[str]) -> List[Dict[str, Any]]:
+                                        seen_ids_list: list[str]) -> list[dict[str, Any]]:
         """Discover new relevant videos using pytubefix contrib Search."""
         if self._pytube_disabled:
             logger.info(
@@ -835,7 +856,7 @@ class ASMRFetcher:
             )
             return []
 
-        new_items: List[Dict[str, Any]] = []
+        new_items: list[dict[str, Any]] = []
 
         filters = (
             Filter.create()
@@ -954,7 +975,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # File load/save helpers
     # -------------------------------------------------------------------------
-    def _load_existing_by_id(self) -> Dict[str, Dict[str, Any]]:
+    def _load_existing_by_id(self) -> dict[str, dict[str, Any]]:
         """Load existing videos from JSON file into a dict keyed by videoId.
 
         Important safety rule:
@@ -985,7 +1006,7 @@ class ASMRFetcher:
             logger.warning(message)
             raise RuntimeError(message)
 
-        existing_by_id: Dict[str, Dict[str, Any]] = {}
+        existing_by_id: dict[str, dict[str, Any]] = {}
         for vid, meta in data.items():
             if not isinstance(meta, dict):
                 meta = {}
@@ -993,9 +1014,9 @@ class ASMRFetcher:
 
         return existing_by_id
 
-    def _load_seen_ids_ordered(self) -> List[str]:
+    def _load_seen_ids_ordered(self) -> list[str]:
         """Load seen video IDs in stable order, removing duplicate lines."""
-        seen_ids_list: List[str] = []
+        seen_ids_list: list[str] = []
         seen_ids_set: set[str] = set()
 
         if not os.path.exists(self.seen_file):
@@ -1025,7 +1046,7 @@ class ASMRFetcher:
         except Exception as exc:  # noqa: BLE001
             logger.warning(f"Could not delete old JSON backup files: {exc}")
 
-    def _write_json_atomic(self, data: Dict[str, Dict[str, Any]]) -> None:
+    def _write_json_atomic(self, data: dict[str, dict[str, Any]]) -> None:
         """Safely write JSON using a temp file, fsync, backup, and atomic replace."""
         output_dir = os.path.dirname(self.json_output) or "."
         os.makedirs(output_dir, exist_ok=True)
@@ -1055,7 +1076,7 @@ class ASMRFetcher:
                     pass
             raise
 
-    def _write_seen_ids_atomic(self, seen_ids_list: List[str]) -> None:
+    def _write_seen_ids_atomic(self, seen_ids_list: list[str]) -> None:
         """Safely write seen video IDs using a temp file and atomic replace."""
         output_dir = os.path.dirname(self.seen_file) or "."
         os.makedirs(output_dir, exist_ok=True)
@@ -1063,8 +1084,7 @@ class ASMRFetcher:
         tmp_path = f"{self.seen_file}.tmp.{os.getpid()}"
         try:
             with open(tmp_path, "w", encoding="utf-8") as f:
-                for vid in seen_ids_list:
-                    f.write(vid + "\n")
+                f.writelines(vid + "\n" for vid in seen_ids_list)
                 f.flush()
                 os.fsync(f.fileno())
 
@@ -1080,7 +1100,7 @@ class ASMRFetcher:
     # -------------------------------------------------------------------------
     # Main public method
     # -------------------------------------------------------------------------
-    def fetch_asmr_videos(self) -> List[str]:
+    def fetch_asmr_videos(self) -> list[str]:
         """Discover and enrich videos, then persist them to JSON."""
         existing_by_id = self._load_existing_by_id()
         original_json_keys = set(existing_by_id.keys())
@@ -1101,7 +1121,7 @@ class ASMRFetcher:
                 existing_by_id[vid] = self._empty_video_metadata()
 
         # Make sure every JSON key is also tracked in the seen file.
-        for vid in existing_by_id.keys():
+        for vid in existing_by_id:
             if vid not in seen_ids_set_for_order:
                 seen_ids_list.append(vid)
                 seen_ids_set_for_order.add(vid)
@@ -1109,7 +1129,7 @@ class ASMRFetcher:
         existing_keys = set(existing_by_id.keys())
         seen_ids_set: set[str] = set(existing_keys)
 
-        all_new_items: List[Dict[str, Any]] = []
+        all_new_items: list[dict[str, Any]] = []
 
         if self.youtube is not None:
             api_items = self._discover_with_api(seen_ids_set, seen_ids_list)
@@ -1122,7 +1142,7 @@ class ASMRFetcher:
             f"Total new non-short relevant videos discovered this run: {len(all_new_items)}"
         )
 
-        combined_by_id: Dict[str, Dict[str, Any]] = {}
+        combined_by_id: dict[str, dict[str, Any]] = {}
 
         for vid, meta in existing_by_id.items():
             combined_by_id[vid] = dict(meta) if isinstance(meta, dict) else {}
@@ -1179,7 +1199,7 @@ class ASMRFetcher:
 # -------------------------------------------------------------------------
 # Date window + API key loading helpers
 # -------------------------------------------------------------------------
-def _coerce_int(val: Any) -> Optional[int]:
+def _coerce_int(val: Any) -> int | None:
     """Best-effort conversion to int; return None if not possible."""
     try:
         if val is None:
@@ -1194,7 +1214,7 @@ def _coerce_int(val: Any) -> Optional[int]:
         return None
 
 
-def _parse_date_only(val: Any) -> Optional[datetime.date]:
+def _parse_date_only(val: Any) -> datetime.date | None:
     """
     Parse a config date value to a datetime.date.
 
@@ -1226,7 +1246,7 @@ def _add_months(d: datetime.date, months: int) -> datetime.date:
     return datetime.date(year, month, day)
 
 
-def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bool]:
+def _compute_date_bounds_with_window() -> tuple[str | None, str | None, bool]:
     """
     Compute (date_before_cfg, date_after_cfg, window_finished) to be passed
     into ASMRFetcher as (published_before, published_after).
@@ -1287,7 +1307,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
     os.makedirs(data_folder, exist_ok=True)
     state_path = os.path.join(data_folder, "date_window_state.json")
 
-    next_start_date: Optional[datetime.date] = None
+    next_start_date: datetime.date | None = None
     if os.path.exists(state_path):
         try:
             with open(state_path, "r", encoding="utf-8") as f:
@@ -1330,7 +1350,7 @@ def _compute_date_bounds_with_window() -> Tuple[Optional[str], Optional[str], bo
     return date_before_cfg, date_after_cfg, False
 
 
-def _load_api_keys_from_secrets() -> List[str]:
+def _load_api_keys_from_secrets() -> list[str]:
     """
     Load one or more API keys from secrets.
 
@@ -1341,7 +1361,7 @@ def _load_api_keys_from_secrets() -> List[str]:
     raw = (
         common.get_secrets("google-api-keys")
     )
-    keys: List[str] = []
+    keys: list[str] = []
 
     if not raw:
         return keys
@@ -1433,6 +1453,14 @@ if __name__ == "__main__":
                     f"published_before={fetcher.published_before}"
                 )
                 fetcher.fetch_asmr_videos()
+
+                if fetcher.discovery_exhausted():
+                    logger.warning(
+                        "Stopping early: the YouTube Data API (quota or errors) and pytubefix "
+                        "(BotDetection) are both unavailable. Remaining date windows were not "
+                        "processed; rerun after the API quota resets (midnight Pacific)."
+                    )
+                    break
 
                 # Compute next window (this advances the state file).
                 next_before, next_after, window_finished = _compute_date_bounds_with_window()

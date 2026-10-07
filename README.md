@@ -39,7 +39,9 @@ The revision package includes the following safeguards:
 * `analysis_reference_date` is fixed to `2026-08-01T00:00:00Z`. Views per day and likes per day therefore do not change simply because the analysis is rerun later.
 * Theme detection defaults to the deterministic rule based method used for the reported manuscript results. It no longer changes silently according to whether a local spaCy model is installed.
 * `force_recompute` defaults to `true`, so stale pickle files cannot silently determine publication results.
-* Randomised algorithms use the configured seed of 42.
+* Randomised algorithms and word cloud layouts use the configured seed of 42.
+* Missing numeric clustering features are median imputed inside the fitted preprocessing pipeline before scaling. Missing values are therefore not treated as observed zeros and missingness itself is not used as a clustering feature.
+* Normality diagnostics are written to `_output/analysis/normality_tests.csv`. The D'Agostino Pearson test uses all positive view counts, while the Shapiro Wilk test uses at most 5,000 observations sampled deterministically with the configured seed.
 * Every analysis run writes `_output/analysis/reproducibility_manifest.json`, containing the input data SHA256 digest, record count, analysis settings, Python version, and package versions.
 * The reproducibility manifest reports coverage of the optional `metadataCollectedAt` and `languageSource` provenance fields. The deposited publication snapshot does not retain these record level fields, so the manifest reports zero timestamps and an unknown language source while preserving the existing language labels.
 * Local configuration, credentials, raw data, caches, and generated output are excluded from version control.
@@ -55,6 +57,7 @@ Install `uv`, clone the repository, and create the locked environment:
 git clone https://github.com/Shaadalam9/ASMR-analysis.git
 cd ASMR-analysis
 uv sync --frozen
+cp default.config config
 ```
 
 The repository contains `.python-version`, `pyproject.toml`, and `uv.lock`. The frozen installation should therefore use the same dependency resolution as the publication release.
@@ -92,7 +95,7 @@ For exact reproduction of the paper, use the deposited 89,241 video snapshot rat
 
 ## Configuration
 
-The versioned defaults in `default.config` reproduce the publication settings. A local `config` file is optional. When present, it only needs to contain values that override the defaults.
+The versioned defaults in `default.config` reproduce the publication settings. The current configuration loader expects a local `config` file containing the complete set of configuration keys. For a reproducible local run, copy `default.config` to `config` and change only values that must differ locally, such as the dataset directory.
 
 | Setting | Publication value | Meaning |
 | --- | --- | --- |
@@ -111,13 +114,13 @@ The versioned defaults in `default.config` reproduce the publication settings. A
 | `clustering_n_clusters` | `11` | K used for the reported exploratory solution |
 | `auto_open_plots` | `false` | Do not open browser windows during batch runs |
 
-Example local override:
+Create the local configuration from the versioned defaults:
 
-```json
-{
-  "data": "/path/to/deposited/data"
-}
+```bash
+cp default.config config
 ```
+
+Then edit only the values that need to differ locally. For example, change the `data` entry in `config` to the directory containing the deposited dataset while leaving the publication analysis settings unchanged.
 
 ## Credentials
 
@@ -153,6 +156,7 @@ Important outputs include:
 * `language_stats.csv`
 * `title_style_stats.csv`
 * `theme_flag_counts.csv`
+* `normality_tests.csv`
 * theme trend tables
 * cluster summaries and full UMAP coordinates
 
@@ -260,6 +264,8 @@ The clustering input combines:
 * up to 5,000 TF IDF title and description unigram and bigram features, with minimum document frequency 5;
 * standardised duration, engagement rate, and views per day;
 * one hot encoded language labels.
+
+Before scaling, missing values in the three numeric clustering features are median imputed using statistics fitted on the clustering input. Missingness indicators are not included in the feature space, so clusters are not formed merely because a metric is unavailable. This prevents missing engagement, growth, or duration values from being treated as genuine zeros.
 
 K means uses \(k=11\), seed 42, and ten initialisations. UMAP is a visual projection of the fitted feature space, not a definitive taxonomy of ASMR subgenres. The two dimensional UMAP uses 50 TruncatedSVD components, 30 neighbours, minimum distance 0.1, cosine distance, and seed 42.
 

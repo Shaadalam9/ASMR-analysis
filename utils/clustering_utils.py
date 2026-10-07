@@ -11,6 +11,7 @@ import matplotlib.pyplot as plt
 from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
 from sklearn.feature_extraction.text import TfidfVectorizer
+from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 from sklearn.decomposition import PCA
@@ -35,6 +36,37 @@ class Clustering_utils():
     def __init__(self) -> None:
         pass
 
+    @staticmethod
+    def _prepare_numeric_features(df: pd.DataFrame) -> list[str]:
+        """Coerce clustering numerics while preserving missing values for imputation."""
+        numeric_cols = ["duration_minutes", "engagement_rate", "views_per_day"]
+        for col in numeric_cols:
+            df[col] = pd.to_numeric(df[col], errors="coerce")
+
+        missing_counts = df[numeric_cols].isna().sum()
+        if int(missing_counts.sum()) > 0:
+            logger.info(
+                "Clustering numeric missing values before median imputation:\n"
+                + missing_counts.to_string()
+            )
+        return numeric_cols
+
+    @staticmethod
+    def _numeric_pipeline() -> Pipeline:
+        """Median impute numeric features, then standardise."""
+        return Pipeline(
+            steps=[
+                (
+                    "imputer",
+                    SimpleImputer(
+                        strategy="median",
+                        keep_empty_features=True,
+                    ),
+                ),
+                ("scaler", StandardScaler(with_mean=False)),
+            ]
+        )
+
     def cluster_videos(self, df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
                        text_source: str = "both") -> Tuple[pd.DataFrame, Optional[Pipeline], Optional[pd.DataFrame]]:
         """Cluster videos using title/description text, duration, engagement, and language."""
@@ -49,8 +81,7 @@ class Clustering_utils():
             "language",
         ]
 
-        for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-            df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
+        numeric_cols = self._prepare_numeric_features(df_copy)
 
         preprocess = ColumnTransformer(
             transformers=[
@@ -65,8 +96,8 @@ class Clustering_utils():
                 ),
                 (
                     "numeric",
-                    StandardScaler(with_mean=False),
-                    ["duration_minutes", "engagement_rate", "views_per_day"],
+                    self._numeric_pipeline(),
+                    numeric_cols,
                 ),
                 (
                     "lang",
@@ -233,8 +264,7 @@ class Clustering_utils():
             "language",
         ]
 
-        for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-            df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
+        numeric_cols = self._prepare_numeric_features(df_copy)
 
         preprocess = ColumnTransformer(
             transformers=[
@@ -249,8 +279,8 @@ class Clustering_utils():
                 ),
                 (
                     "numeric",
-                    StandardScaler(with_mean=False),
-                    ["duration_minutes", "engagement_rate", "views_per_day"],
+                    self._numeric_pipeline(),
+                    numeric_cols,
                 ),
                 (
                     "lang",
@@ -394,8 +424,7 @@ class Clustering_utils():
             "language",
         ]
 
-        for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-            df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
+        numeric_cols = self._prepare_numeric_features(df_copy)
 
         preprocess = ColumnTransformer(
             transformers=[
@@ -410,8 +439,8 @@ class Clustering_utils():
                 ),
                 (
                     "numeric",
-                    StandardScaler(with_mean=False),
-                    ["duration_minutes", "engagement_rate", "views_per_day"],
+                    self._numeric_pipeline(),
+                    numeric_cols,
                 ),
                 (
                     "lang",
@@ -576,9 +605,8 @@ class Clustering_utils():
             "language",
         ]
 
-        # Ensure numeric columns are numeric
-        for col in ["duration_minutes", "engagement_rate", "views_per_day"]:
-            df_copy[col] = pd.to_numeric(df_copy[col], errors="coerce").fillna(0.0)
+        # Preserve missing numeric values for fitted median imputation.
+        numeric_cols = self._prepare_numeric_features(df_copy)
 
         # ColumnTransformer identical to cluster_videos
         preprocess = ColumnTransformer(
@@ -594,8 +622,8 @@ class Clustering_utils():
                 ),
                 (
                     "numeric",
-                    StandardScaler(with_mean=False),
-                    ["duration_minutes", "engagement_rate", "views_per_day"],
+                    self._numeric_pipeline(),
+                    numeric_cols,
                 ),
                 (
                     "lang",

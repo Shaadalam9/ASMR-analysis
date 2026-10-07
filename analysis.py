@@ -108,6 +108,7 @@ def write_reproducibility_manifest(json_path: str, data: Dict[str, Any], text_so
         "pandas",
         "numpy",
         "scikit-learn",
+        "scipy",
         "spacy",
         "umap-learn",
         "plotly",
@@ -582,7 +583,7 @@ def summarize_theme_by_duration_bucket(df: pd.DataFrame, theme_col: str) -> pd.D
     # Group by (theme_col, duration_bucket) and aggregate counts plus
     # mean/SD for both raw and log10-transformed metrics.
     agg = (
-        df_copy.groupby([theme_col, "duration_bucket"])
+        df_copy.groupby([theme_col, "duration_bucket"], observed=False)
         .agg(
             video_count=("video_id", "count"),
 

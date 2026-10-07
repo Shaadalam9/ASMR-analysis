@@ -1,10 +1,15 @@
 import math
 import unittest
 
+import numpy as np
+import pandas as pd
+
 import common
 from main import ASMRFetcher
+from utils.clustering_utils import Clustering_utils
 from utils.preprocessing import Preprocessing
 from utils.tool import Tools
+from utils.viz_core import Plots
 from utils.viz_summaries import theme_display_name
 
 
@@ -96,6 +101,41 @@ class DerivedMeasureTests(unittest.TestCase):
             self.preprocessing.normalize_language_code(None),
             "Unknown",
         )
+
+
+class ClusteringPreprocessingTests(unittest.TestCase):
+    def test_numeric_preprocessing_uses_median_imputation_without_zero_fill(self):
+        clustering = Clustering_utils()
+        frame = pd.DataFrame(
+            {
+                "duration_minutes": [10.0, None, 30.0],
+                "engagement_rate": [0.10, 0.20, None],
+                "views_per_day": [100.0, None, 300.0],
+            }
+        )
+
+        numeric_cols = clustering._prepare_numeric_features(frame)
+        pipeline = clustering._numeric_pipeline()
+        transformed = pipeline.fit_transform(frame[numeric_cols])
+
+        np.testing.assert_allclose(
+            pipeline.named_steps["imputer"].statistics_,
+            [20.0, 0.15, 200.0],
+        )
+        self.assertFalse(np.isnan(np.asarray(transformed, dtype=float)).any())
+        self.assertEqual(transformed.shape[1], len(numeric_cols))
+        self.assertTrue(math.isnan(frame.loc[1, "duration_minutes"]))
+
+
+class VisualReproducibilityTests(unittest.TestCase):
+    def test_wordcloud_layout_is_deterministic(self):
+        plots = Plots()
+        text = "asmr sleep whisper tapping relaxation " * 20
+
+        first = plots.generate_wordcloud_image(text, set())
+        second = plots.generate_wordcloud_image(text, set())
+
+        self.assertTrue(np.array_equal(first, second))
 
 
 class ThemeAndDurationTests(unittest.TestCase):

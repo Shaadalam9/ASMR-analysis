@@ -35,6 +35,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
+            random_state=int(common.get_configs("random_seed")),
         ).generate(text)
         img = wordcloud.to_array()
         logger.info(
@@ -54,6 +55,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
+            random_state=int(common.get_configs("random_seed")),
         ).generate_from_frequencies(frequencies)
         img = wordcloud.to_array()
         logger.info(
@@ -192,6 +194,7 @@ class Plots():
             return
 
         log_views = np.log10(views)
+        random_seed = int(common.get_configs("random_seed"))
 
         logger.info("===== LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
         logger.info(f"N = {len(log_views)}")
@@ -204,16 +207,51 @@ class Plots():
             "(H0: data come from a normal distribution)"
         )
 
-        sample = log_views
         max_n_shapiro = 5000
-        if len(sample) > max_n_shapiro:
-            sample = sample.sample(max_n_shapiro, random_state=42)  # type: ignore
+        shapiro_sampled = len(log_views) > max_n_shapiro
+        sample = (
+            log_views.sample(max_n_shapiro, random_state=random_seed)  # type: ignore
+            if shapiro_sampled
+            else log_views
+        )
 
         w_stat, p_shapiro = stats.shapiro(sample)
+        shapiro_sampling = (
+            f"simple random sample without replacement from N={len(log_views)}"
+            if shapiro_sampled
+            else "full positive-view sample"
+        )
         logger.info(
-            f"Shapiro–Wilk: W = {w_stat:.3f}, p-value = {p_shapiro:.3g} "
+            f"Shapiro–Wilk (n={len(sample)}; {shapiro_sampling}): "
+            f"W = {w_stat:.3f}, p-value = {p_shapiro:.3g} "
             "(H0: data come from a normal distribution)"
         )
+
+        analysis_dir = os.path.join(common.output_dir, "analysis")
+        os.makedirs(analysis_dir, exist_ok=True)
+        normality_results = pd.DataFrame(
+            [
+                {
+                    "test": "D'Agostino-Pearson",
+                    "statistic": float(k2),
+                    "p_value": float(p_normaltest),
+                    "n": int(len(log_views)),
+                    "sampling": "all positive view counts",
+                    "random_seed": None,
+                },
+                {
+                    "test": "Shapiro-Wilk",
+                    "statistic": float(w_stat),
+                    "p_value": float(p_shapiro),
+                    "n": int(len(sample)),
+                    "sampling": shapiro_sampling,
+                    "random_seed": random_seed if shapiro_sampled else None,
+                },
+            ]
+        )
+        normality_path = os.path.join(analysis_dir, "normality_tests.csv")
+        normality_results.to_csv(normality_path, index=False)
+        logger.info(f"Normality diagnostics saved to {normality_path}")
 
         logger.info(
             "Interpretation: if p-values are << 0.05, log10(views) deviates from a "
