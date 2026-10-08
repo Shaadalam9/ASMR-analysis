@@ -1,6 +1,6 @@
 import pandas as pd
 
-from asmr.logger import CustomLogger
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 

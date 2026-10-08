@@ -6,7 +6,7 @@ import pandas as pd
 import plotly.graph_objects as go
 from plotly.subplots import make_subplots
 
-from asmr import settings
+import common
 from asmr.analysis.supplementary.shared import (
     SEED,
     TEXT_SOURCE,
@@ -85,7 +85,7 @@ def cluster_diagnostics(df: pd.DataFrame) -> None:
 
     # Per-cluster silhouette for the primary solution and for the finer k=11 solution
     per_all = []
-    for kk in sorted({int(settings.get_configs("clustering_n_clusters")), 11}):
+    for kk in sorted({int(common.get_configs("clustering_n_clusters")), 11}):
         labk = labels_by_k[kk]
         sk = silhouette_samples(Z[sil_idx], labk[sil_idx])
         per = pd.DataFrame({"cluster": labk[sil_idx], "s": sk}).groupby("cluster")["s"].agg(["mean", "size"])
@@ -95,14 +95,14 @@ def cluster_diagnostics(df: pd.DataFrame) -> None:
         per_all.append(per)
     save_table(pd.concat(per_all, ignore_index=True), "kmeans_per_cluster_silhouette.csv")
 
-    primary = int(settings.get_configs("clustering_n_clusters"))
+    primary = int(common.get_configs("clustering_n_clusters"))
     fig = make_subplots(rows=1, cols=3, subplot_titles=(
         "(a) Silhouette (higher is better)", "(b) Davies-Bouldin (lower is better)",
         "(c) Stability, ARI on 80% subsamples"))
     for col, ycol in enumerate(("silhouette_svd50_sample10k", "davies_bouldin_svd50", "mean_ari_vs_reference"), 1):
         sub = metrics.dropna(subset=[ycol])
         fig.add_trace(go.Scatter(x=sub["k"], y=sub[ycol], mode="lines+markers", showlegend=False,
-                                   hovertemplate="k=%{x}<br>%{y:.3f}<extra></extra>"), row=1, col=col)
+                                 hovertemplate="k=%{x}<br>%{y:.3f}<extra></extra>"), row=1, col=col)
         fig.add_vline(x=primary, line_dash="dot", line_color="gray", row=1, col=col)
         fig.update_xaxes(title_text="Number of clusters k", dtick=2, row=1, col=col)
     fig.update_layout(height=450, width=1300)

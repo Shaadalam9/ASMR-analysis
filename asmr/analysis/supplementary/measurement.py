@@ -119,4 +119,4 @@ def measurement_audit(df: pd.DataFrame) -> None:
     sample["url"] = "https://www.youtube.com/watch?v=" + sample["video_id"]
     sample = sample.sample(frac=1.0, random_state=SEED).reset_index(drop=True)
     save_table(sample.drop(columns=["rule_flag"]).assign(_rule_flag_hidden_key=sample["rule_flag"]),
-         "theme_validation_sample_to_annotate.csv")
+               "theme_validation_sample_to_annotate.csv")

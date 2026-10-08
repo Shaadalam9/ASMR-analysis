@@ -64,9 +64,11 @@ Every PNG in this README links to an interactive HTML version of the same figure
 ## Repository structure
 
 ```text
+main.py                         Entry point for video discovery (used by the cron job)
+analysis.py                     Entry point for the publication analysis
+common.py                       Paths, configuration (`config`, `default.config`), secrets and shared helpers
+custom_logger.py, logmod.py     Logging helpers (`str.format`-style logger and log set-up)
 asmr/                           Python package (run modules with `python -m ...`)
-  settings.py                   Paths, configuration and secrets
-  logger.py, logging_config.py  Logging helpers
   collection/
     discover.py                 Windowed video discovery and initial metadata collection
     enrich_metadata.py          Optional refresh of existing metadata and video statistics

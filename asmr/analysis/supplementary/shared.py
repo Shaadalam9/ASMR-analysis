@@ -6,17 +6,17 @@ from typing import Iterable
 import pandas as pd
 import plotly.graph_objects as go
 
-from asmr import settings
-from asmr.logger import CustomLogger
+import common
 from asmr.processing.preprocessing import Preprocessing
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
-SEED = int(settings.get_configs("random_seed"))
-TEXT_SOURCE = settings.get_configs("analysis_text_source")
-ANALYSIS_DIR = os.path.join(settings.output_dir, "analysis")
+SEED = int(common.get_configs("random_seed"))
+TEXT_SOURCE = common.get_configs("analysis_text_source")
+ANALYSIS_DIR = os.path.join(common.output_dir, "analysis")
 OUT = os.path.join(ANALYSIS_DIR, "extra")
-FIG = os.path.join(settings.root_dir, "figures")
+FIG = os.path.join(common.root_dir, "figures")
 os.makedirs(OUT, exist_ok=True)
 os.makedirs(FIG, exist_ok=True)
 
@@ -53,8 +53,8 @@ def save_table(df: pd.DataFrame, name: str) -> None:
 def save_figure(fig: go.Figure, name: str, width: int = 1200, height: int = 800, scale: int = 3) -> None:
     """Save a Plotly figure as interactive HTML (Plotly.js from the CDN), PNG and EPS in ``figures/``."""
     fig.update_layout(
-        template=settings.get_configs("plotly_template"), plot_bgcolor="white", paper_bgcolor="white",
-        font=dict(family=settings.get_configs("font_family"), size=14), width=width, height=height,
+        template=common.get_configs("plotly_template"), plot_bgcolor="white", paper_bgcolor="white",
+        font=dict(family=common.get_configs("font_family"), size=14), width=width, height=height,
     )
     fig.write_html(os.path.join(FIG, f"{name}.html"), include_plotlyjs="cdn", full_html=True)
     try:

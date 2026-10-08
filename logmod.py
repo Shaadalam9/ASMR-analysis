@@ -5,7 +5,7 @@ import os
 import sys
 from typing import Optional, Union
 
-from asmr import settings
+import common
 
 
 def logs(
@@ -79,7 +79,7 @@ def logs(
         date_str = dt.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
         log_filename = "log_{}_{}.log".format(program_name, date_str)
         if path is None:
-            path = settings.log_dir
+            path = common.log_dir
         file_handler = logging.FileHandler(filename=os.path.join(path, log_filename))
         file_handler.setFormatter(formatter)
         file_handler.setLevel(_convert_logging_level(save_level))

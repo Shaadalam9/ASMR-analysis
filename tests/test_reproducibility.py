@@ -4,7 +4,7 @@ import unittest
 import numpy as np
 import pandas as pd
 
-from asmr import settings
+import common
 from asmr.analysis.clustering import Clustering
 from asmr.collection.discover import ASMRFetcher
 from asmr.processing.preprocessing import Preprocessing
@@ -16,7 +16,7 @@ from asmr.visualization.summary_figures import theme_display_name
 class ConfigurationTests(unittest.TestCase):
     def test_publication_reference_date_is_fixed(self):
         self.assertEqual(
-            settings.get_configs("analysis_reference_date"),
+            common.get_configs("analysis_reference_date"),
             "2026-09-01T00:00:00Z",
         )
 

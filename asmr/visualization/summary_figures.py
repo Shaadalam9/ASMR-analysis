@@ -1,8 +1,8 @@
 import pandas as pd
 import plotly.express as px
 
-from asmr.logger import CustomLogger
 from asmr.visualization.figures import Plots
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 

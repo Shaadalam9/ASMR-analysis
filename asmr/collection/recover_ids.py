@@ -33,9 +33,9 @@ from langdetect import DetectorFactory, detect
 from pytubefix import YouTube
 from pytubefix import exceptions as pytube_exceptions
 
-from asmr import settings
-from asmr.logger import CustomLogger
-from asmr.logging_config import logs
+import common
+from custom_logger import CustomLogger
+from logmod import logs
 
 DetectorFactory.seed = 0
 
@@ -81,7 +81,7 @@ DISABLE_PYTUBEFIX_AFTER_HTTP_429 = True
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
-logs(show_level=settings.get_configs("logger_level"), show_color=True)
+logs(show_level=common.get_configs("logger_level"), show_color=True)
 logger = CustomLogger(__name__)
 
 
@@ -89,7 +89,7 @@ logger = CustomLogger(__name__)
 # Generic helpers
 # -----------------------------------------------------------------------------
 def _data_folder() -> str:
-    folder = settings.get_configs("data")
+    folder = common.get_configs("data")
     if not folder:
         folder = "."
     os.makedirs(folder, exist_ok=True)
@@ -475,8 +475,8 @@ def _load_api_keys_from_secrets() -> List[str]:
     raw = (
         os.environ.get("YOUTUBE_API_KEYS")
         or os.environ.get("YOUTUBE_API_KEY")
-        or settings.get_secrets("google-api-keys")
-        or settings.get_secrets("google-api-key")
+        or common.get_secrets("google-api-keys")
+        or common.get_secrets("google-api-key")
     )
     keys: List[str] = []
 
@@ -771,7 +771,7 @@ class PytubefixFallback:
                 "recovery_status": "recovered_from_pytubefix",
             }, "success"
         except pytube_exceptions.BotDetection:
-            logger.warning("pytubefix bot detection while reading video {}. Keeping ID in seen files.".format(video_id))
+            logger.warning("pytubefix bot detection while reading video {}. Keeping ID in seen files.", video_id)
             return None, "bot_detection"
         except Exception as exc:  # noqa: BLE001
             if _is_rate_limit_error(exc):

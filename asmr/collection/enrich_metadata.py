@@ -30,9 +30,9 @@ from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
 from pytubefix import YouTube
 
-from asmr import settings
-from asmr.logger import CustomLogger
-from asmr.logging_config import logs
+import common
+from custom_logger import CustomLogger
+from logmod import logs
 
 # Make langdetect deterministic (otherwise results can vary run-to-run).
 DetectorFactory.seed = 0
@@ -55,7 +55,7 @@ class JSONMetadataEnricher:
         )
 
         # Initialize logging.
-        logs(show_level=settings.get_configs("logger_level"), show_color=True)
+        logs(show_level=common.get_configs("logger_level"), show_color=True)
         self.logger = CustomLogger(__name__)
 
         # Initialize YouTube API client only if an API key is given.
@@ -734,11 +734,11 @@ if __name__ == "__main__":
     # Get API key (may be None/empty; then channel_average_views & API stats may stay None).
     secret_api = (
         os.environ.get("YOUTUBE_API_KEY")
-        or settings.get_secrets("google-api-keys")
+        or common.get_secrets("google-api-keys")
     )
 
     # Resolve data folder and JSON filename from configs.
-    data_folder = settings.get_configs("data")
+    data_folder = common.get_configs("data")
     os.makedirs(data_folder, exist_ok=True)
 
     json_filename = "asmr_results.json"
@@ -747,7 +747,7 @@ if __name__ == "__main__":
     enricher = JSONMetadataEnricher(
         api_key=secret_api,  # type: ignore
         json_path=json_path,
-        update_views_likes=bool(settings.get_configs("refresh_existing_statistics")),
+        update_views_likes=bool(common.get_configs("refresh_existing_statistics")),
         force_refresh_channel_avg=False,  # set True to recompute channel_average_views even when present
     )
     enricher.enrich_json()

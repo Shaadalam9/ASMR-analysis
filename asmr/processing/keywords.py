@@ -5,11 +5,11 @@ from typing import Any, Dict, Optional, Set
 
 import pandas as pd
 
-from asmr import settings
-from asmr.logger import CustomLogger
+import common
 from asmr.processing.preprocessing import Preprocessing
 from asmr.processing.text_tools import Tools  # for normalize_lemma_form, stopwords, etc.
 from asmr.visualization.figures import Plots
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
@@ -151,7 +151,7 @@ class KeywordAnalysis():
         - Variants are collapsed via Tools.normalize_lemma_form.
         - Result is cached in a PKL file for fast subsequent runs.
         """
-        analysis_dir = os.path.join(settings.output_dir, "analysis")
+        analysis_dir = os.path.join(common.output_dir, "analysis")
         os.makedirs(analysis_dir, exist_ok=True)
 
         verb_pickle = os.path.join(

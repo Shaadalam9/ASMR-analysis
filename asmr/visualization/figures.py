@@ -11,16 +11,16 @@ import plotly.graph_objects as go
 from scipy import stats
 from wordcloud import WordCloud
 
-from asmr import settings
-from asmr.logger import CustomLogger
+import common
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
 # Default scaling factor for saved PNG images.
 SCALE = 3
 
-font_family = settings.get_configs("font_family")
-font_size = settings.get_configs("font_size")
+font_family = common.get_configs("font_family")
+font_size = common.get_configs("font_size")
 
 
 class Plots():
@@ -35,7 +35,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
-            random_state=int(settings.get_configs("random_seed")),
+            random_state=int(common.get_configs("random_seed")),
         ).generate(text)
         img = wordcloud.to_array()
         logger.info(
@@ -55,7 +55,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
-            random_state=int(settings.get_configs("random_seed")),
+            random_state=int(common.get_configs("random_seed")),
         ).generate_from_frequencies(frequencies)
         img = wordcloud.to_array()
         logger.info(
@@ -79,13 +79,13 @@ class Plots():
                            scale: int = SCALE, save_final: bool = True, save_png: bool = True,
                            save_eps: bool = True, auto_open: bool = True, save_html: bool = True) -> None:
         """Save a Plotly figure as HTML, PNG, and EPS formats."""
-        auto_open = bool(auto_open and settings.get_configs("auto_open_plots"))
-        output_final = os.path.join(settings.root_dir, "figures")
-        os.makedirs(settings.output_dir, exist_ok=True)
+        auto_open = bool(auto_open and common.get_configs("auto_open_plots"))
+        output_final = os.path.join(common.root_dir, "figures")
+        os.makedirs(common.output_dir, exist_ok=True)
         os.makedirs(output_final, exist_ok=True)
 
         fig.update_layout(
-            template=settings.get_configs("plotly_template"),
+            template=common.get_configs("plotly_template"),
             plot_bgcolor="white",
             paper_bgcolor="white",
             font=dict(
@@ -116,7 +116,7 @@ class Plots():
         )
 
         if save_html:
-            html_path = os.path.join(settings.output_dir, filename + ".html")
+            html_path = os.path.join(common.output_dir, filename + ".html")
             py.offline.plot(
                 fig,
                 filename=html_path,
@@ -141,7 +141,7 @@ class Plots():
                         message=".*Support for Kaleido versions less than 1.0.0.*",
                         category=DeprecationWarning,
                     )
-                    png_path = os.path.join(settings.output_dir, filename + ".png")
+                    png_path = os.path.join(common.output_dir, filename + ".png")
                     fig.write_image(
                         png_path,
                         width=width,
@@ -155,7 +155,7 @@ class Plots():
             if save_eps:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
-                    eps_path = os.path.join(settings.output_dir, filename + ".eps")
+                    eps_path = os.path.join(common.output_dir, filename + ".eps")
                     fig.write_image(
                         eps_path,
                         width=width,
@@ -197,7 +197,7 @@ class Plots():
             return
 
         log_views = np.log10(views)
-        random_seed = int(settings.get_configs("random_seed"))
+        random_seed = int(common.get_configs("random_seed"))
 
         logger.info("===== LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
         logger.info(f"N = {len(log_views)}")
@@ -230,7 +230,7 @@ class Plots():
             "(H0: data come from a normal distribution)"
         )
 
-        analysis_dir = os.path.join(settings.output_dir, "analysis")
+        analysis_dir = os.path.join(common.output_dir, "analysis")
         os.makedirs(analysis_dir, exist_ok=True)
         normality_results = pd.DataFrame(
             [

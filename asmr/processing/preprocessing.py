@@ -7,9 +7,9 @@ import numpy as np
 import pandas as pd
 import spacy
 
-from asmr import settings
-from asmr.logger import CustomLogger
+import common
 from asmr.processing.text_tools import Tools
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
@@ -83,7 +83,7 @@ class Preprocessing():
         """Convert the raw JSON dict into a pandas DataFrame with derived fields."""
         if reference_date is None:
             reference_date = self.parse_reference_datetime(
-                settings.get_configs("analysis_reference_date")
+                common.get_configs("analysis_reference_date")
             )
         else:
             reference_date = self.parse_reference_datetime(reference_date)
@@ -240,7 +240,7 @@ class Preprocessing():
         methods according to whether a local spaCy model happens to exist.
         """
         mode = str(
-            detection_mode or settings.get_configs("theme_detection_mode")
+            detection_mode or common.get_configs("theme_detection_mode")
         ).strip().lower()
         if mode not in {"rule_based", "spacy"}:
             raise ValueError(
@@ -269,7 +269,7 @@ class Preprocessing():
         if mode == "rule_based":
             df = self._add_theme_flags_rule_based(df, texts, theme_cols)
             df["theme_detection_method"] = "english_lexical_rules"
-            df["theme_rule_version"] = str(settings.get_configs("theme_rule_version"))
+            df["theme_rule_version"] = str(common.get_configs("theme_rule_version"))
             theme_counts = {col: int(df[col].sum()) for col in theme_cols}
             logger.info(
                 "Rule-based theme flag counts "
@@ -421,7 +421,7 @@ class Preprocessing():
 
         theme_counts = {col: int(df[col].sum()) for col in theme_cols}
         df["theme_detection_method"] = f"spacy:{model_name}"
-        df["theme_rule_version"] = str(settings.get_configs("theme_rule_version"))
+        df["theme_rule_version"] = str(common.get_configs("theme_rule_version"))
         logger.info(f"Theme flag counts (number of videos with flag=True): {theme_counts}")
 
         return df

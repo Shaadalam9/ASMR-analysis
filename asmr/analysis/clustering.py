@@ -12,9 +12,9 @@ from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
 
-from asmr.logger import CustomLogger
 from asmr.processing.preprocessing import Preprocessing
 from asmr.visualization.figures import Plots
+from custom_logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
@@ -714,10 +714,10 @@ class Clustering():
             f"Full {embedding_name} static cluster plot saved as {filename}.png/.eps with {len(df_plot)} points."
         )
 
-    def plot_embedding_research(self, df: pd.DataFrame, name_suffix: str = "tsne_research", label_clusters: bool = True,
-                           ellipse_scale: float = 1.2, max_points: Optional[int] = 12000,
-                           random_state: int = 42, embedding_name: str = "t-SNE",
-                           filename_prefix: str = "cluster_tsne_research"):
+    def plot_embedding_research(self, df: pd.DataFrame, name_suffix: str = "tsne_research",
+                                label_clusters: bool = True, ellipse_scale: float = 1.2,
+                                max_points: Optional[int] = 12000, random_state: int = 42,
+                                embedding_name: str = "t-SNE", filename_prefix: str = "cluster_tsne_research"):
         """
         Produce a research-style 2D embedding plot with:
         - stable color map
@@ -923,4 +923,3 @@ class Clustering():
             embedding_name="UMAP",
             filename_prefix="cluster_umap_research",
         )
-
