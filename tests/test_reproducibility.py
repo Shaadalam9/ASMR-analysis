@@ -4,20 +4,20 @@ import unittest
 import numpy as np
 import pandas as pd
 
-import common
-from main import ASMRFetcher
-from utils.clustering_utils import Clustering_utils
-from utils.preprocessing import Preprocessing
-from utils.tool import Tools
-from utils.viz_core import Plots
-from utils.viz_summaries import theme_display_name
+from asmr import settings
+from asmr.analysis.clustering import Clustering
+from asmr.collection.discover import ASMRFetcher
+from asmr.processing.preprocessing import Preprocessing
+from asmr.processing.text_tools import Tools
+from asmr.visualization.figures import Plots
+from asmr.visualization.summary_figures import theme_display_name
 
 
 class ConfigurationTests(unittest.TestCase):
     def test_publication_reference_date_is_fixed(self):
         self.assertEqual(
-            common.get_configs("analysis_reference_date"),
-            "2026-08-01T00:00:00Z",
+            settings.get_configs("analysis_reference_date"),
+            "2026-09-01T00:00:00Z",
         )
 
     def test_placeholder_collection_dates_are_unset(self):
@@ -43,7 +43,7 @@ class DerivedMeasureTests(unittest.TestCase):
                 "views": 300,
                 "likes": 30,
                 "duration": 600,
-                "uploadDate": "2026-07-02T00:00:00Z",
+                "uploadDate": "2026-08-02T00:00:00Z",
             }
         }
 
@@ -56,7 +56,7 @@ class DerivedMeasureTests(unittest.TestCase):
         self.assertAlmostEqual(row["engagement_rate"], 0.1)
         self.assertEqual(
             row["analysis_reference_date"],
-            "2026-08-01T00:00:00+00:00",
+            "2026-09-01T00:00:00+00:00",
         )
 
     def test_future_upload_has_no_daily_rate(self):
@@ -68,7 +68,7 @@ class DerivedMeasureTests(unittest.TestCase):
                 "views": 100,
                 "likes": 5,
                 "duration": 600,
-                "uploadDate": "2026-08-02T00:00:00Z",
+                "uploadDate": "2026-09-02T00:00:00Z",
             }
         }
 
@@ -105,7 +105,7 @@ class DerivedMeasureTests(unittest.TestCase):
 
 class ClusteringPreprocessingTests(unittest.TestCase):
     def test_numeric_preprocessing_uses_median_imputation_without_zero_fill(self):
-        clustering = Clustering_utils()
+        clustering = Clustering()
         frame = pd.DataFrame(
             {
                 "duration_minutes": [10.0, None, 30.0],
@@ -120,11 +120,26 @@ class ClusteringPreprocessingTests(unittest.TestCase):
 
         np.testing.assert_allclose(
             pipeline.named_steps["imputer"].statistics_,
-            [20.0, 0.15, 200.0],
+            [np.log10([10.0, 30.0]).mean(), np.log10([0.10, 0.20]).mean(), np.log10([100.0, 300.0]).mean()],
         )
         self.assertFalse(np.isnan(np.asarray(transformed, dtype=float)).any())
         self.assertEqual(transformed.shape[1], len(numeric_cols))
-        self.assertTrue(math.isnan(frame.loc[1, "duration_minutes"]))
+        self.assertTrue(math.isnan(frame.loc[1, numeric_cols[0]]))
+
+    def test_zero_duration_is_missing_not_a_measured_value(self):
+        clustering = Clustering()
+        frame = pd.DataFrame(
+            {
+                "duration_minutes": [0.0, 10.0],
+                "engagement_rate": [0.1, 0.1],
+                "views_per_day": [1.0, 1.0],
+            }
+        )
+
+        numeric_cols = clustering._prepare_numeric_features(frame)
+        self.assertTrue(math.isnan(frame.loc[0, numeric_cols[0]]))
+        self.assertAlmostEqual(frame.loc[1, numeric_cols[0]], 1.0)
+        self.assertEqual(frame.loc[0, "duration_minutes"], 0.0)
 
 
 class VisualReproducibilityTests(unittest.TestCase):

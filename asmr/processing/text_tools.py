@@ -1,9 +1,9 @@
-import pandas as pd
-from wordcloud import STOPWORDS
-from typing import Optional, Set, Dict
 import logging
 import re
+from typing import Dict, Optional, Set
 
+import pandas as pd
+from wordcloud import STOPWORDS
 
 logger = logging.getLogger(__name__)
 
@@ -111,7 +111,6 @@ class Tools():
             "relaxation": "relax",
             "relaxing": "relax",
             "relaxed": "relax",
-            "relaxation": "relax"
         }
 
         return LEMMA_CANON.get(lemma, lemma)

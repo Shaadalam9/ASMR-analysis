@@ -84,7 +84,7 @@ Example:
     To run as a script, ensure your configs and secrets are set up,
     then:
 
-        python main.py
+        python -m asmr.collection.discover
 
 Author:
     Shadab Alam <md_shadab_alam@outlook.com>
@@ -108,18 +108,18 @@ from pytubefix import YouTube
 from pytubefix import exceptions as pytube_exceptions
 from pytubefix.contrib.search import Filter, Search
 
-import common
-from custom_logger import CustomLogger
-from logmod import logs
+from asmr import settings
+from asmr.logger import CustomLogger
+from asmr.logging_config import logs
 
 # Make langdetect deterministic (otherwise results can vary run-to-run).
 DetectorFactory.seed = 0
 
-data_folder = common.get_configs("data")
+data_folder = settings.get_configs("data")
 
 
 # Logging
-logs(show_level=common.get_configs("logger_level"), show_color=True)
+logs(show_level=settings.get_configs("logger_level"), show_color=True)
 logger = CustomLogger(__name__)
 
 
@@ -160,7 +160,7 @@ class ASMRFetcher:
         self.results_per_page = results_per_page
 
         # Paths
-        self.data_folder = common.get_configs("data")
+        self.data_folder = settings.get_configs("data")
         os.makedirs(self.data_folder, exist_ok=True)
         self.seen_file = os.path.join(self.data_folder, seen_file)
         self.json_output = os.path.join(self.data_folder, json_output)
@@ -1278,9 +1278,9 @@ def _compute_date_bounds_with_window() -> tuple[str | None, str | None, bool]:
         * Once current_start reaches or passes global_end, the function
           returns (None, None, True). The caller should then stop looping.
     """
-    raw_before = common.get_configs("date_before") or common.get_configs("date")
-    raw_after = common.get_configs("date_after")
-    raw_window = common.get_configs("date_window_months")
+    raw_before = settings.get_configs("date_before") or settings.get_configs("date")
+    raw_after = settings.get_configs("date_after")
+    raw_window = settings.get_configs("date_window_months")
 
     window_months = _coerce_int(raw_window) or 0
 
@@ -1359,7 +1359,7 @@ def _load_api_keys_from_secrets() -> list[str]:
         - google-api-key: single key (fallback)
     """
     raw = (
-        common.get_secrets("google-api-keys")
+        settings.get_secrets("google-api-keys")
     )
     keys: list[str] = []
 
@@ -1392,10 +1392,10 @@ if __name__ == "__main__":
     if os.path.isfile(os.path.join(data_folder, "date_window_state.json")):
         os.remove(os.path.join(data_folder, "date_window_state.json"))
 
-    raw_window = common.get_configs("date_window_months")
+    raw_window = settings.get_configs("date_window_months")
     window_months = _coerce_int(raw_window) or 0
-    configured_start = _parse_date_only(common.get_configs("date_before"))
-    configured_end = _parse_date_only(common.get_configs("date_after"))
+    configured_start = _parse_date_only(settings.get_configs("date_before"))
+    configured_end = _parse_date_only(settings.get_configs("date_after"))
     windowing_enabled = (
         window_months > 0
         and configured_start is not None
@@ -1407,7 +1407,7 @@ if __name__ == "__main__":
         date_before_cfg, date_after_cfg, _ = _compute_date_bounds_with_window()
         fetcher = ASMRFetcher(
             api_keys=secret.API_KEYS,
-            query=common.get_configs("query"),
+            query=settings.get_configs("query"),
             max_pages=100,
             results_per_page=50,
             seen_file="seen_video_ids.txt",
@@ -1427,7 +1427,7 @@ if __name__ == "__main__":
         date_before_cfg, date_after_cfg, window_finished = _compute_date_bounds_with_window()
 
         if window_finished:
-            logs(show_level=common.get_configs("logger_level"), show_color=True)
+            logs(show_level=settings.get_configs("logger_level"), show_color=True)
             logger = CustomLogger(__name__)
             logger.info(
                 "Date windowing: configured range has already been fully processed. "
@@ -1437,7 +1437,7 @@ if __name__ == "__main__":
             # Create one fetcher and reuse it across windows so key quota state is preserved.
             fetcher = ASMRFetcher(
                 api_keys=secret.API_KEYS,
-                query=common.get_configs("query"),
+                query=settings.get_configs("query"),
                 max_pages=100,
                 results_per_page=50,
                 seen_file="seen_video_ids.txt",

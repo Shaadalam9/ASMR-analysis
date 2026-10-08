@@ -1,26 +1,20 @@
-import pandas as pd
-import numpy as np
-import os
-from custom_logger import CustomLogger
-import common
 from typing import Any, Dict, Optional, Tuple
+
+import numpy as np
+import pandas as pd
 import plotly.express as px
 import plotly.graph_objects as go
-import matplotlib.pyplot as plt
-
 from sklearn.cluster import KMeans
 from sklearn.compose import ColumnTransformer
+from sklearn.decomposition import PCA, TruncatedSVD
 from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.impute import SimpleImputer
 from sklearn.pipeline import Pipeline
 from sklearn.preprocessing import OneHotEncoder, StandardScaler
-from sklearn.decomposition import PCA
-from sklearn.decomposition import TruncatedSVD
-from sklearn.manifold import TSNE
 
-from utils.preprocessing import Preprocessing
-from utils.viz_core import Plots
-
+from asmr.logger import CustomLogger
+from asmr.processing.preprocessing import Preprocessing
+from asmr.visualization.figures import Plots
 
 logger = CustomLogger(__name__)
 
@@ -31,25 +25,43 @@ SCALE = 3
 pre_process_class = Preprocessing()
 plots_class = Plots()
 
+# Log10-scaled numeric clustering inputs. Duration, engagement rate, and views per day are
+# heavy tailed, so raw standardised values let a handful of extreme videos define whole clusters.
+CLUSTER_NUMERIC_COLS = [
+    "cluster_log10_duration_minutes",
+    "cluster_log10_engagement_rate",
+    "cluster_log10_views_per_day",
+]
+RATE_FLOOR = 1e-4
 
-class Clustering_utils():
+
+class Clustering():
     def __init__(self) -> None:
         pass
 
     @staticmethod
     def _prepare_numeric_features(df: pd.DataFrame) -> list[str]:
-        """Coerce clustering numerics while preserving missing values for imputation."""
-        numeric_cols = ["duration_minutes", "engagement_rate", "views_per_day"]
-        for col in numeric_cols:
-            df[col] = pd.to_numeric(df[col], errors="coerce")
+        """Add log10-scaled clustering numerics while preserving missing values for imputation."""
+        raw_to_log = {
+            "duration_minutes": "cluster_log10_duration_minutes",
+            "engagement_rate": "cluster_log10_engagement_rate",
+            "views_per_day": "cluster_log10_views_per_day",
+        }
+        for raw, logged in raw_to_log.items():
+            values = pd.to_numeric(df[raw], errors="coerce")
+            values = values.where(values.notna() & np.isfinite(values))
+            if raw == "duration_minutes":
+                # A zero duration marks an unretrieved record, not a measured zero-length video.
+                values = values.where(values > 0)
+            df[logged] = np.log10(values.clip(lower=RATE_FLOOR))
 
-        missing_counts = df[numeric_cols].isna().sum()
+        missing_counts = df[CLUSTER_NUMERIC_COLS].isna().sum()
         if int(missing_counts.sum()) > 0:
             logger.info(
                 "Clustering numeric missing values before median imputation:\n"
                 + missing_counts.to_string()
             )
-        return numeric_cols
+        return list(CLUSTER_NUMERIC_COLS)
 
     @staticmethod
     def _numeric_pipeline() -> Pipeline:
@@ -67,6 +79,22 @@ class Clustering_utils():
             ]
         )
 
+    @staticmethod
+    def _build_preprocessor(numeric_cols: list[str]) -> ColumnTransformer:
+        """Feature pipeline shared by all clustering routines: TF-IDF text, scaled numerics, one-hot language."""
+        return ColumnTransformer(
+            transformers=[
+                (
+                    "text",
+                    TfidfVectorizer(max_features=5000, ngram_range=(1, 2), min_df=5),
+                    "text_all",
+                ),
+                ("numeric", Clustering._numeric_pipeline(), numeric_cols),
+                ("lang", OneHotEncoder(handle_unknown="ignore"), ["language"]),
+            ],
+            remainder="drop",
+        )
+
     def cluster_videos(self, df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
                        text_source: str = "both") -> Tuple[pd.DataFrame, Optional[Pipeline], Optional[pd.DataFrame]]:
         """Cluster videos using title/description text, duration, engagement, and language."""
@@ -75,38 +103,13 @@ class Clustering_utils():
 
         feature_cols = [
             "text_all",
-            "duration_minutes",
-            "engagement_rate",
-            "views_per_day",
+            *CLUSTER_NUMERIC_COLS,
             "language",
         ]
 
         numeric_cols = self._prepare_numeric_features(df_copy)
 
-        preprocess = ColumnTransformer(
-            transformers=[
-                (
-                    "text",
-                    TfidfVectorizer(
-                        max_features=5000,
-                        ngram_range=(1, 2),
-                        min_df=5,
-                    ),
-                    "text_all",
-                ),
-                (
-                    "numeric",
-                    self._numeric_pipeline(),
-                    numeric_cols,
-                ),
-                (
-                    "lang",
-                    OneHotEncoder(handle_unknown="ignore"),
-                    ["language"],
-                ),
-            ],
-            remainder="drop",
-        )
+        preprocess = self._build_preprocessor(numeric_cols)
 
         pipeline = Pipeline(
             steps=[
@@ -241,155 +244,6 @@ class Clustering_utils():
         )
         return sampled_positions
 
-    def cluster_videos_tsne(self, df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
-                            text_source: str = "both", tsne_perplexity: float = 30.0,
-                            tsne_learning_rate: float = 200.0, tsne_n_iter: int = 1000,
-                            tsne_max_samples: int = 15000, svd_components: int = 50
-                            ) -> Tuple[pd.DataFrame, Optional[Pipeline]]:
-        """
-        Cluster all videos, then compute a t-SNE layout for a representative subset.
-
-        t-SNE and interactive browser plots do not scale well to tens of thousands
-        of points. For large corpora, KMeans labels are still assigned to every
-        video, while embedding_x / embedding_y are filled only for the sampled rows.
-        """
-        df_copy = df.copy()
-        df_copy["text_all"] = pre_process_class.get_text_series(df_copy, text_source=text_source)
-
-        feature_cols = [
-            "text_all",
-            "duration_minutes",
-            "engagement_rate",
-            "views_per_day",
-            "language",
-        ]
-
-        numeric_cols = self._prepare_numeric_features(df_copy)
-
-        preprocess = ColumnTransformer(
-            transformers=[
-                (
-                    "text",
-                    TfidfVectorizer(
-                        max_features=5000,
-                        ngram_range=(1, 2),
-                        min_df=5,
-                    ),
-                    "text_all",
-                ),
-                (
-                    "numeric",
-                    self._numeric_pipeline(),
-                    numeric_cols,
-                ),
-                (
-                    "lang",
-                    OneHotEncoder(handle_unknown="ignore"),
-                    ["language"],
-                ),
-            ],
-            remainder="drop",
-        )
-
-        pipeline = Pipeline(
-            steps=[
-                ("preprocess", preprocess),
-                (
-                    "cluster",
-                    KMeans(
-                        n_clusters=n_clusters,
-                        random_state=random_state,
-                        n_init=10,
-                    ),
-                ),
-            ]
-        )
-
-        X = df_copy[feature_cols]
-        logger.info(
-            f"Fitting clustering model with t-SNE embedding on {len(df_copy)} videos "
-            f"(text_source={text_source}, n_clusters={n_clusters})"
-        )
-        pipeline.fit(X)
-
-        logger.info("Assigning cluster labels (t-SNE version)...")
-        df_copy["cluster"] = pipeline.predict(X)
-
-        df_copy["embedding_x"] = np.nan
-        df_copy["embedding_y"] = np.nan
-
-        try:
-            logger.info("Computing 2D t-SNE embedding for cluster visualization...")
-            features = pipeline.named_steps["preprocess"].transform(X)
-
-            sample_positions = self._sample_positions_by_cluster(
-                df_copy["cluster"],
-                max_samples=tsne_max_samples,
-                random_state=random_state,
-            )
-            features_for_tsne = features[sample_positions]
-
-            n_features = features_for_tsne.shape[1]
-            n_samples = features_for_tsne.shape[0]
-            max_components = min(int(svd_components), n_features - 1, n_samples - 1)
-
-            if max_components >= 2:
-                svd = TruncatedSVD(
-                    n_components=max_components,
-                    random_state=random_state,
-                )
-                features_reduced = svd.fit_transform(features_for_tsne)
-                logger.info(
-                    f"Reduced sampled feature space to {max_components} dimensions "
-                    "via TruncatedSVD before t-SNE."
-                )
-            else:
-                features_reduced = (
-                    features_for_tsne.toarray()
-                    if hasattr(features_for_tsne, "toarray")
-                    else np.array(features_for_tsne)
-                )
-                logger.info(
-                    "Skipped SVD reduction before t-SNE because the sampled dataset is very small."
-                )
-
-            tsne_kwargs = dict(
-                n_components=2,
-                perplexity=min(tsne_perplexity, max(1.0, (n_samples - 1) / 3.0)),
-                learning_rate=tsne_learning_rate,
-                random_state=random_state,
-                init="random",
-            )
-            try:
-                tsne = TSNE(**tsne_kwargs, max_iter=tsne_n_iter)
-            except TypeError:
-                tsne = TSNE(**tsne_kwargs, n_iter=tsne_n_iter)
-
-            embedding_2d = tsne.fit_transform(features_reduced)
-
-            df_copy.iloc[sample_positions, df_copy.columns.get_loc("embedding_x")] = embedding_2d[:, 0]
-            df_copy.iloc[sample_positions, df_copy.columns.get_loc("embedding_y")] = embedding_2d[:, 1]
-
-            logger.info(
-                "Completed t-SNE embedding with "
-                f"{embedding_2d.shape[0]} sampled points. "
-                "Rows without sampled embeddings remain NaN."
-            )
-
-            if "cluster" in df_copy.columns:
-                cluster_counts = df_copy["cluster"].value_counts().sort_index()
-                logger.info(
-                    "Cluster sizes (t-SNE embedding version):\n"
-                    f"{cluster_counts.to_string()}"
-                )
-
-        except Exception as exc:
-            logger.warning(f"Could not compute 2D t-SNE embedding for clusters: {exc}")
-            df_copy["embedding_x"] = np.nan
-            df_copy["embedding_y"] = np.nan
-
-        return df_copy, pipeline
-
     def cluster_videos_umap(self, df: pd.DataFrame, n_clusters: int = 11, random_state: int = 42,
                             text_source: str = "both", umap_n_neighbors: int = 30,
                             umap_min_dist: float = 0.1, umap_metric: str = "cosine",
@@ -418,38 +272,13 @@ class Clustering_utils():
 
         feature_cols = [
             "text_all",
-            "duration_minutes",
-            "engagement_rate",
-            "views_per_day",
+            *CLUSTER_NUMERIC_COLS,
             "language",
         ]
 
         numeric_cols = self._prepare_numeric_features(df_copy)
 
-        preprocess = ColumnTransformer(
-            transformers=[
-                (
-                    "text",
-                    TfidfVectorizer(
-                        max_features=5000,
-                        ngram_range=(1, 2),
-                        min_df=5,
-                    ),
-                    "text_all",
-                ),
-                (
-                    "numeric",
-                    self._numeric_pipeline(),
-                    numeric_cols,
-                ),
-                (
-                    "lang",
-                    OneHotEncoder(handle_unknown="ignore"),
-                    ["language"],
-                ),
-            ],
-            remainder="drop",
-        )
+        preprocess = self._build_preprocessor(numeric_cols)
 
         pipeline = Pipeline(
             steps=[
@@ -599,9 +428,7 @@ class Clustering_utils():
 
         feature_cols = [
             "text_all",
-            "duration_minutes",
-            "engagement_rate",
-            "views_per_day",
+            *CLUSTER_NUMERIC_COLS,
             "language",
         ]
 
@@ -609,30 +436,7 @@ class Clustering_utils():
         numeric_cols = self._prepare_numeric_features(df_copy)
 
         # ColumnTransformer identical to cluster_videos
-        preprocess = ColumnTransformer(
-            transformers=[
-                (
-                    "text",
-                    TfidfVectorizer(
-                        max_features=5000,
-                        ngram_range=(1, 2),
-                        min_df=5,
-                    ),
-                    "text_all",
-                ),
-                (
-                    "numeric",
-                    self._numeric_pipeline(),
-                    numeric_cols,
-                ),
-                (
-                    "lang",
-                    OneHotEncoder(handle_unknown="ignore"),
-                    ["language"],
-                ),
-            ],
-            remainder="drop",
-        )
+        preprocess = self._build_preprocessor(numeric_cols)
 
         X_raw = df_copy[feature_cols]
 
@@ -855,11 +659,11 @@ class Clustering_utils():
     def plot_embedding_static_full(self, df: pd.DataFrame, name_suffix: str = "umap_full",
                                    embedding_name: str = "UMAP",
                                    filename_prefix: str = "cluster_umap_full_static") -> None:
-        """Save a full-dataset static 2D cluster plot as PNG and EPS.
+        """Save a full-dataset static 2D cluster plot as PNG and EPS (no HTML).
 
-        This uses every row with embedding_x / embedding_y. It is intentionally
-        static because very large interactive HTML files can fail to open in the
-        browser even when the underlying embedding was computed correctly.
+        Every row with embedding_x / embedding_y is drawn. It is intentionally static because very
+        large interactive HTML files can fail to open in the browser even when the underlying
+        embedding was computed correctly. The interactive version is the downsampled scatter plot.
         """
         required = {"cluster", "embedding_x", "embedding_y"}
         if required - set(df.columns):
@@ -872,68 +676,45 @@ class Clustering_utils():
             return
 
         df_plot["cluster"] = df_plot["cluster"].astype(int)
-        unique_clusters = sorted(df_plot["cluster"].unique())
         color_map = plots_class._get_cluster_color_map(df_plot["cluster"].values)  # type: ignore
 
-        output_final = os.path.join(common.root_dir, "figures")
-        os.makedirs(common.output_dir, exist_ok=True)
-        os.makedirs(output_final, exist_ok=True)
+        fig = go.Figure()
+        for cluster_id, grp in df_plot.groupby("cluster"):
+            fig.add_trace(
+                go.Scattergl(
+                    x=grp["embedding_x"],
+                    y=grp["embedding_y"],
+                    mode="markers",
+                    name=f"Cluster {cluster_id}",
+                    marker=dict(size=3, opacity=0.35, color=color_map[str(cluster_id)]),
+                )
+            )
+            fig.add_annotation(
+                x=grp["embedding_x"].mean(),
+                y=grp["embedding_y"].mean(),
+                text=f"<b>{cluster_id}</b>",
+                showarrow=False,
+                font=dict(size=20),
+            )
+        fig.update_xaxes(visible=False)
+        fig.update_yaxes(visible=False)
+        fig.update_layout(legend=dict(itemsizing="constant"))
 
         filename = f"{filename_prefix}_{name_suffix}"
-        output_png = os.path.join(common.output_dir, filename + ".png")
-        final_png = os.path.join(output_final, filename + ".png")
-        output_eps = os.path.join(common.output_dir, filename + ".eps")
-        final_eps = os.path.join(output_final, filename + ".eps")
-
-        fig, ax = plt.subplots(figsize=(14, 10), dpi=180)
-        for cluster_id in unique_clusters:
-            grp = df_plot[df_plot["cluster"] == cluster_id]
-            ax.scatter(
-                grp["embedding_x"],
-                grp["embedding_y"],
-                s=3,
-                alpha=0.35,
-                label=f"Cluster {cluster_id}",
-                c=color_map[str(cluster_id)],
-                linewidths=0,
-            )
-
-        for cluster_id, grp in df_plot.groupby("cluster"):
-            ax.text(
-                grp["embedding_x"].mean(),
-                grp["embedding_y"].mean(),
-                str(cluster_id),
-                fontsize=14,
-                fontweight="bold",
-                ha="center",
-                va="center",
-            )
-
-        ax.set_xlabel("")
-        ax.set_ylabel("")
-        ax.set_xticks([])
-        ax.set_yticks([])
-        ax.set_title("")
-        ax.legend(markerscale=4, frameon=False, fontsize=9, loc="best")
-        fig.tight_layout()
-
-        fig.savefig(output_png, bbox_inches="tight")
-        fig.savefig(output_eps, bbox_inches="tight")
-        plt.close(fig)
-
-        try:
-            import shutil
-            shutil.copy(output_png, final_png)
-            shutil.copy(output_eps, final_eps)
-        except Exception as exc:
-            logger.warning(f"Could not copy full static embedding plot to figures directory: {exc}")
-
+        plots_class.save_plotly_figure(
+            fig,
+            filename,
+            width=1400,
+            height=1000,
+            scale=SCALE,
+            save_html=False,
+            auto_open=False,
+        )
         logger.info(
-            f"Full {embedding_name} static cluster plot saved to {output_png} "
-            f"and {final_png} with {len(df_plot)} points."
+            f"Full {embedding_name} static cluster plot saved as {filename}.png/.eps with {len(df_plot)} points."
         )
 
-    def plot_tsne_research(self, df: pd.DataFrame, name_suffix: str = "tsne_research", label_clusters: bool = True,
+    def plot_embedding_research(self, df: pd.DataFrame, name_suffix: str = "tsne_research", label_clusters: bool = True,
                            ellipse_scale: float = 1.2, max_points: Optional[int] = 12000,
                            random_state: int = 42, embedding_name: str = "t-SNE",
                            filename_prefix: str = "cluster_tsne_research"):
@@ -1132,7 +913,7 @@ class Clustering_utils():
                            label_clusters: bool = True, ellipse_scale: float = 1.2,
                            max_points: Optional[int] = None, random_state: int = 42):
         """Produce a research-style UMAP plot using all available embedded rows by default."""
-        return self.plot_tsne_research(
+        return self.plot_embedding_research(
             df=df,
             name_suffix=name_suffix,
             label_clusters=label_clusters,

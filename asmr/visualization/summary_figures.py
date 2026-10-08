@@ -1,8 +1,8 @@
-import plotly.express as px
 import pandas as pd
-from custom_logger import CustomLogger
+import plotly.express as px
 
-from utils.viz_core import Plots
+from asmr.logger import CustomLogger
+from asmr.visualization.figures import Plots
 
 logger = CustomLogger(__name__)
 
@@ -23,7 +23,7 @@ THEME_DISPLAY_NAMES = {
     "has_keyboard": "keyboard or typing",
     "has_visual": "visual trigger",
     "has_drive": "driving",
-    # Kept for the legacy alias used by analysis.py for the driving plot.
+    # Kept for the legacy alias used by the publication pipeline for the driving plot.
     "drive": "driving",
 }
 
@@ -36,7 +36,7 @@ def theme_display_name(theme_col: str) -> str:
     )
 
 
-class Viz_summaries():
+class SummaryFigures():
     def __init__(self) -> None:
         pass
 

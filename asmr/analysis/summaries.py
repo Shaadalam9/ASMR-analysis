@@ -1,6 +1,6 @@
 import pandas as pd
-from custom_logger import CustomLogger
 
+from asmr.logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
@@ -269,21 +269,3 @@ class Summaries():
                 )
 
         return trend
-
-    def compute_seasonal_sleep_pattern(self, df: pd.DataFrame) -> pd.DataFrame:
-        """Are 'sleep' videos more common in winter?"""
-        if "has_sleep" not in df.columns:
-            raise ValueError("Theme flag 'has_sleep' not present.")
-
-        agg = (
-            df.groupby("upload_season")["has_sleep"]
-            .mean()
-            .reset_index(name="sleep_share")
-        )
-        agg["sleep_share"] = agg["sleep_share"].astype(float)
-
-        logger.info(
-            "Seasonal sleep-share pattern:\n"
-            f"{agg.to_string(index=False)}"
-        )
-        return agg

@@ -1,7 +1,7 @@
 # -*- coding: utf-8 -*-
 """Recover YouTube JSON metadata from seen video ID text files.
 
-This script is separate from main.py. It reads video IDs from one or more
+This script is separate from discover.py. It reads video IDs from one or more
 seen*.txt files, compares them with the existing JSON, fetches missing metadata,
 and writes the recovered data back to the original JSON file safely.
 
@@ -30,12 +30,12 @@ from typing import Any, Dict, Iterable, List, Optional, Sequence, Tuple
 
 from googleapiclient.discovery import build  # type: ignore
 from langdetect import DetectorFactory, detect
-from pytubefix import YouTube, exceptions as pytube_exceptions
+from pytubefix import YouTube
+from pytubefix import exceptions as pytube_exceptions
 
-from logmod import logs
-import common
-from custom_logger import CustomLogger
-
+from asmr import settings
+from asmr.logger import CustomLogger
+from asmr.logging_config import logs
 
 DetectorFactory.seed = 0
 
@@ -81,7 +81,7 @@ DISABLE_PYTUBEFIX_AFTER_HTTP_429 = True
 # -----------------------------------------------------------------------------
 # Logging
 # -----------------------------------------------------------------------------
-logs(show_level=common.get_configs("logger_level"), show_color=True)
+logs(show_level=settings.get_configs("logger_level"), show_color=True)
 logger = CustomLogger(__name__)
 
 
@@ -89,7 +89,7 @@ logger = CustomLogger(__name__)
 # Generic helpers
 # -----------------------------------------------------------------------------
 def _data_folder() -> str:
-    folder = common.get_configs("data")
+    folder = settings.get_configs("data")
     if not folder:
         folder = "."
     os.makedirs(folder, exist_ok=True)
@@ -475,8 +475,8 @@ def _load_api_keys_from_secrets() -> List[str]:
     raw = (
         os.environ.get("YOUTUBE_API_KEYS")
         or os.environ.get("YOUTUBE_API_KEY")
-        or common.get_secrets("google-api-keys")
-        or common.get_secrets("google-api-key")
+        or settings.get_secrets("google-api-keys")
+        or settings.get_secrets("google-api-key")
     )
     keys: List[str] = []
 
@@ -787,7 +787,9 @@ class PytubefixFallback:
                 return None, "rate_limited"
             if _looks_unavailable_error(exc):
                 return None, "unavailable"
-            logger.warning("pytubefix metadata extraction failed for {}: {}. Keeping ID in seen files.".format(video_id, exc))
+            logger.warning(
+                "pytubefix metadata extraction failed for {}: {}. Keeping ID in seen files.".format(video_id, exc)
+            )
             return None, "error"
 
 

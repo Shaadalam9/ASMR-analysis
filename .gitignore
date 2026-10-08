@@ -217,3 +217,12 @@ _output
 
 # Debugging files
 check.py
+# LaTeX build artefacts
+paper/*.aux
+paper/*.bbl
+paper/*.blg
+paper/*.fdb_latexmk
+paper/*.fls
+paper/*.log
+paper/*.out
+paper/*-eps-converted-to.pdf

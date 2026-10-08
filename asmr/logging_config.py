@@ -1,10 +1,11 @@
 """Contain function to display or store logging messages."""
-import logging
-import sys
-import os
 import datetime as dt
-from typing import Union, Optional
-import common
+import logging
+import os
+import sys
+from typing import Optional, Union
+
+from asmr import settings
 
 
 def logs(
@@ -78,7 +79,7 @@ def logs(
         date_str = dt.datetime.utcnow().strftime("%Y-%m-%d_%H-%M-%S")
         log_filename = "log_{}_{}.log".format(program_name, date_str)
         if path is None:
-            path = common.log_dir
+            path = settings.log_dir
         file_handler = logging.FileHandler(filename=os.path.join(path, log_filename))
         file_handler.setFormatter(formatter)
         file_handler.setLevel(_convert_logging_level(save_level))
@@ -92,7 +93,6 @@ def _logging_level_threshold():
     """
     for mod_name in [
         "requests",
-        "matplotlib",
         "numexpr.utils",
         "urllib3.connectionpool",
         "PIL.TiffImagePlugin",

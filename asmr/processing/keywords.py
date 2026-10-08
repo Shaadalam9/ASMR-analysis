@@ -1,14 +1,15 @@
-from custom_logger import CustomLogger
-import common
-import pandas as pd
-from typing import Any, Dict, Optional, Set
 import os
 import re
 from collections import Counter
+from typing import Any, Dict, Optional, Set
 
-from utils.tool import Tools  # for normalize_lemma_form, stopwords, etc.
-from utils.preprocessing import Preprocessing
-from utils.viz_core import Plots
+import pandas as pd
+
+from asmr import settings
+from asmr.logger import CustomLogger
+from asmr.processing.preprocessing import Preprocessing
+from asmr.processing.text_tools import Tools  # for normalize_lemma_form, stopwords, etc.
+from asmr.visualization.figures import Plots
 
 logger = CustomLogger(__name__)
 
@@ -19,7 +20,7 @@ plots_class = Plots()
 LATIN_RE = re.compile(r"^[A-Za-z]+$")
 
 
-class Keyword_analysis():
+class KeywordAnalysis():
     def __init__(self) -> None:
         pass
 
@@ -139,68 +140,6 @@ class Keyword_analysis():
 
         return df
 
-    def compute_lemma_trend_over_time(self, df: pd.DataFrame, lemma_name: str, lemma_targets: Set[str],
-                                      text_source: str = "both", model_name: str = "en_core_web_sm") -> pd.DataFrame:
-        """
-        Number of videos per year containing any of the given lemmas.
-
-        Lemmas are normalised via Tools.normalize_lemma_form so that
-        variants (e.g. "relaxation", "relaxing") all count as one.
-        """
-        nlp = pre_process_class.get_spacy_nlp(model_name)
-        if nlp is None:
-            logger.warning("spaCy not available; lemma trend not computed.")
-            return pd.DataFrame(columns=["upload_year", "theme_count", "total_videos"])
-
-        df_tmp = df.dropna(subset=["upload_year"]).copy()
-        df_tmp["upload_year"] = df_tmp["upload_year"].astype(int)
-
-        texts = pre_process_class.get_text_series(df_tmp, text_source=text_source).tolist()
-        years = df_tmp["upload_year"].tolist()
-
-        # Normalise target lemmas once
-        lemma_targets_norm = {
-            tool_class.normalize_lemma_form(le.lower())
-            for le in lemma_targets
-        }
-
-        records: list[tuple[int, bool]] = []
-
-        for year, doc in zip(years, nlp.pipe(texts, batch_size=256)):
-            lemma_set = {
-                tool_class.normalize_lemma_form(tok.lemma_.lower())
-                for tok in doc
-                if tok.is_alpha and not tok.is_stop
-            }
-            has_lemma = bool(lemma_set & lemma_targets_norm)
-            records.append((year, has_lemma))
-
-        if not records:
-            return pd.DataFrame(columns=["upload_year", "theme_count", "total_videos"])
-
-        tmp = pd.DataFrame(records, columns=["upload_year", "has_lemma"])
-
-        grouped = tmp.groupby("upload_year")["has_lemma"]
-        trend = (
-            grouped.agg(
-                theme_count=lambda s: int(s.sum()),
-                total_videos="count",
-            )
-            .reset_index()
-        )
-
-        if not trend.empty:
-            logger.info(
-                f"Lemma trend for '{lemma_name}': {len(trend)} years, "
-                f"total videos with lemma={int(trend['theme_count'].sum())}"
-            )
-            logger.info(
-                "Lemma trend table:\n"
-                f"{trend.to_string(index=False)}"
-            )
-
-        return trend
-
     def run_verb_lemma_wordcloud_pipeline(self, data: Dict[str, Any], text_source: str = "both",
                                           model_name: str = "en_core_web_sm", top_k: int = 200,
                                           use_cache: bool = True) -> None:
@@ -212,7 +151,7 @@ class Keyword_analysis():
         - Variants are collapsed via Tools.normalize_lemma_form.
         - Result is cached in a PKL file for fast subsequent runs.
         """
-        analysis_dir = os.path.join(common.output_dir, "analysis")
+        analysis_dir = os.path.join(settings.output_dir, "analysis")
         os.makedirs(analysis_dir, exist_ok=True)
 
         verb_pickle = os.path.join(

@@ -1,26 +1,26 @@
-from wordcloud import WordCloud
-from typing import Set, Dict, Any
+import os
+import shutil
+import warnings
+from typing import Any, Dict, Set
+
+import numpy as np
+import pandas as pd
 import plotly as py
 import plotly.express as px
-from custom_logger import CustomLogger
-import common
-import os
-import warnings
-import shutil
-import pandas as pd
-import numpy as np
+import plotly.graph_objects as go
 from scipy import stats
-import matplotlib.pyplot as plt
-import webbrowser
+from wordcloud import WordCloud
 
+from asmr import settings
+from asmr.logger import CustomLogger
 
 logger = CustomLogger(__name__)
 
 # Default scaling factor for saved PNG images.
 SCALE = 3
 
-font_family = common.get_configs("font_family")
-font_size = common.get_configs("font_size")
+font_family = settings.get_configs("font_family")
+font_size = settings.get_configs("font_size")
 
 
 class Plots():
@@ -35,7 +35,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
-            random_state=int(common.get_configs("random_seed")),
+            random_state=int(settings.get_configs("random_seed")),
         ).generate(text)
         img = wordcloud.to_array()
         logger.info(
@@ -55,7 +55,7 @@ class Plots():
             background_color="white",
             stopwords=stopwords,
             collocations=False,
-            random_state=int(common.get_configs("random_seed")),
+            random_state=int(settings.get_configs("random_seed")),
         ).generate_from_frequencies(frequencies)
         img = wordcloud.to_array()
         logger.info(
@@ -77,15 +77,15 @@ class Plots():
 
     def save_plotly_figure(self, fig: Any, filename: str, width: int = 1600, height: int = 900,
                            scale: int = SCALE, save_final: bool = True, save_png: bool = True,
-                           save_eps: bool = True, auto_open: bool = True) -> None:
+                           save_eps: bool = True, auto_open: bool = True, save_html: bool = True) -> None:
         """Save a Plotly figure as HTML, PNG, and EPS formats."""
-        auto_open = bool(auto_open and common.get_configs("auto_open_plots"))
-        output_final = os.path.join(common.root_dir, "figures")
-        os.makedirs(common.output_dir, exist_ok=True)
+        auto_open = bool(auto_open and settings.get_configs("auto_open_plots"))
+        output_final = os.path.join(settings.root_dir, "figures")
+        os.makedirs(settings.output_dir, exist_ok=True)
         os.makedirs(output_final, exist_ok=True)
 
         fig.update_layout(
-            template=common.get_configs("plotly_template"),
+            template=settings.get_configs("plotly_template"),
             plot_bgcolor="white",
             paper_bgcolor="white",
             font=dict(
@@ -115,20 +115,23 @@ class Plots():
             ),
         )
 
-        html_path = os.path.join(common.output_dir, filename + ".html")
-        py.offline.plot(
-            fig,
-            filename=html_path,
-            auto_open=auto_open,
-        )
-
-        if save_final:
-            final_html_path = os.path.join(output_final, filename + ".html")
+        if save_html:
+            html_path = os.path.join(settings.output_dir, filename + ".html")
             py.offline.plot(
                 fig,
-                filename=final_html_path,
-                auto_open=False,
+                filename=html_path,
+                auto_open=auto_open,
+                include_plotlyjs="cdn",
             )
+
+            if save_final:
+                final_html_path = os.path.join(output_final, filename + ".html")
+                py.offline.plot(
+                    fig,
+                    filename=final_html_path,
+                    auto_open=False,
+                    include_plotlyjs="cdn",
+                )
 
         try:
             if save_png:
@@ -138,7 +141,7 @@ class Plots():
                         message=".*Support for Kaleido versions less than 1.0.0.*",
                         category=DeprecationWarning,
                     )
-                    png_path = os.path.join(common.output_dir, filename + ".png")
+                    png_path = os.path.join(settings.output_dir, filename + ".png")
                     fig.write_image(
                         png_path,
                         width=width,
@@ -152,7 +155,7 @@ class Plots():
             if save_eps:
                 with warnings.catch_warnings():
                     warnings.simplefilter("ignore", DeprecationWarning)
-                    eps_path = os.path.join(common.output_dir, filename + ".eps")
+                    eps_path = os.path.join(settings.output_dir, filename + ".eps")
                     fig.write_image(
                         eps_path,
                         width=width,
@@ -194,7 +197,7 @@ class Plots():
             return
 
         log_views = np.log10(views)
-        random_seed = int(common.get_configs("random_seed"))
+        random_seed = int(settings.get_configs("random_seed"))
 
         logger.info("===== LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
         logger.info(f"N = {len(log_views)}")
@@ -227,7 +230,7 @@ class Plots():
             "(H0: data come from a normal distribution)"
         )
 
-        analysis_dir = os.path.join(common.output_dir, "analysis")
+        analysis_dir = os.path.join(settings.output_dir, "analysis")
         os.makedirs(analysis_dir, exist_ok=True)
         normality_results = pd.DataFrame(
             [
@@ -312,26 +315,22 @@ class Plots():
 
         logger.info("===== END LOG10(VIEWS) DISTRIBUTION ANALYSIS =====")
 
-    def plot_duration_vs_views(self, df: pd.DataFrame) -> None:
+    def plot_duration_vs_views(self, df: pd.DataFrame, bins: int = 70) -> None:
         """
-        Hexbin plot: log–log duration (seconds) vs views for all videos.
-        Uses Matplotlib and saves HTML, PNG, and EPS. The HTML is opened
-        in the default browser.
+        Log-log density of duration (seconds) against views for all videos with positive values.
+
+        Saves an interactive HTML file (hover shows the number of videos per cell) plus PNG and EPS.
         """
         df_plot = df[["duration_seconds", "views"]].copy()
         df_plot = df_plot.replace([np.inf, -np.inf], np.nan).dropna()
-        df_plot = df_plot[
-            (df_plot["duration_seconds"] > 0) &
-            (df_plot["views"] > 0)
-        ]
+        df_plot = df_plot[(df_plot["duration_seconds"] > 0) & (df_plot["views"] > 0)]
 
         if df_plot.empty:
             logger.warning("No data for duration vs views plot.")
             return
 
         logger.info(
-            f"Duration vs views hexbin plot uses {len(df_plot)} videos with positive "
-            "duration and views."
+            f"Duration vs views density plot uses {len(df_plot)} videos with positive duration and views."
         )
         logger.info(
             "Duration (seconds) summary for plotted videos:\n"
@@ -342,89 +341,34 @@ class Plots():
             f"{df_plot['views'].describe().to_string()}"
         )
 
-        # Matplotlib hexbin on log–log axes
-        fig, ax = plt.subplots(figsize=(12, 8))
+        log_duration = np.log10(df_plot["duration_seconds"].to_numpy())
+        log_views = np.log10(df_plot["views"].to_numpy())
+        counts, x_edges, y_edges = np.histogram2d(log_duration, log_views, bins=bins)
+        x_centres = (x_edges[:-1] + x_edges[1:]) / 2
+        y_centres = (y_edges[:-1] + y_edges[1:]) / 2
+        z = np.log10(np.where(counts > 0, counts, np.nan)).T
 
-        hb = ax.hexbin(
-            df_plot["duration_seconds"].to_numpy(),
-            df_plot["views"].to_numpy(),
-            gridsize=60,
-            xscale="log",
-            yscale="log",
-            bins="log",
-            mincnt=1,
+        fig = go.Figure(
+            go.Heatmap(
+                x=x_centres,
+                y=y_centres,
+                z=z,
+                customdata=counts.T,
+                colorscale="Viridis",
+                colorbar=dict(title="log10 videos"),
+                hovertemplate=(
+                    "duration ~ 10^%{x:.2f} s<br>views ~ 10^%{y:.2f}<br>videos: %{customdata:.0f}<extra></extra>"
+                ),
+            )
         )
-        # Colorbar: control size + font sizes
-        cb = fig.colorbar(
-            hb,
-            ax=ax,
-            shrink=0.9,   # < 1.0 = shorter, > 1.0 = longer
-            aspect=30,    # larger = thinner bar, smaller = thicker bar
+        fig.update_layout(
+            xaxis_title="log10 duration (seconds)",
+            yaxis_title="log10 views",
         )
-        cb.set_label("")   # colorbar label size
-        cb.ax.tick_params(labelsize=14)       # colorbar tick label size
-
-        ax.set_xscale("log")
-        ax.set_yscale("log")
-
-        # Bigger axis labels
-        ax.set_xlabel("Duration (seconds)", fontsize=16)
-        ax.set_ylabel("Views", fontsize=16)
-
-        # Bigger tick labels
-        ax.tick_params(axis="both", which="major", labelsize=14)
-        ax.tick_params(axis="both", which="minor", labelsize=12)
-
-        ax.set_title("")
-
-        fig.tight_layout()
-
-        # Save files
-        filename = "duration_vs_views"
-        os.makedirs(common.output_dir, exist_ok=True)
-        output_final = os.path.join(common.root_dir, "figures")
-        os.makedirs(output_final, exist_ok=True)
-
-        png_path = os.path.join(common.output_dir, f"{filename}.png")
-        eps_path = os.path.join(common.output_dir, f"{filename}.eps")
-        html_path = os.path.join(common.output_dir, f"{filename}.html")
-
-        fig.savefig(png_path, format="png", dpi=300, bbox_inches="tight")
-        fig.savefig(eps_path, format="eps", dpi=300, bbox_inches="tight")
-
-        final_png_path = os.path.join(output_final, f"{filename}.png")
-        final_eps_path = os.path.join(output_final, f"{filename}.eps")
-        shutil.copy(png_path, final_png_path)
-        shutil.copy(eps_path, final_eps_path)
-
-        # Simple HTML referencing the PNG (works from both output/ and figures/)
-        rel_png_name = f"{filename}.png"
-        html_content = f"""<!DOCTYPE html>
-        <html>
-        <head>
-            <meta charset='utf-8'>
-            <title>{filename}</title>
-        </head>
-        <body>
-            <img src='{rel_png_name}' alt='{filename}' />
-        </body>
-        </html>
-        """
-
-        with open(html_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-
-        final_html_path = os.path.join(output_final, f"{filename}.html")
-        with open(final_html_path, "w", encoding="utf-8") as f:
-            f.write(html_content)
-
-        plt.close(fig)
-
-        # Try to auto-open the HTML file in the default browser
-        if common.get_configs("auto_open_plots"):
-            try:
-                abs_html = os.path.abspath(html_path)
-                webbrowser.open(f"file://{abs_html}", new=2)
-                logger.info(f"Opened HTML for {filename} at {abs_html}")
-            except Exception as exc:
-                logger.warning(f"Could not auto-open HTML for {filename}: {exc}")
+        self.save_plotly_figure(
+            fig,
+            filename="duration_vs_views",
+            width=1200,
+            height=800,
+            scale=SCALE,
+        )

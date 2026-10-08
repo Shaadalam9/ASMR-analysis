@@ -1,5 +1,3 @@
-from custom_logger import CustomLogger
-from logmod import logs
 import hashlib
 import importlib.metadata as importlib_metadata
 import json
@@ -12,16 +10,16 @@ import numpy as np
 import pandas as pd
 import plotly.express as px
 
-import common
-
-from utils.tool import Tools
-from utils.viz_core import Plots
-from utils.viz_summaries import Viz_summaries
-from utils.preprocessing import Preprocessing
-from utils.clustering_utils import Clustering_utils
-from utils.summaries import Summaries
-from utils.keyword_analysis import Keyword_analysis
-
+from asmr import settings
+from asmr.analysis.clustering import Clustering
+from asmr.analysis.summaries import Summaries
+from asmr.logger import CustomLogger
+from asmr.logging_config import logs
+from asmr.processing.keywords import KeywordAnalysis
+from asmr.processing.preprocessing import Preprocessing
+from asmr.processing.text_tools import Tools
+from asmr.visualization.figures import Plots
+from asmr.visualization.summary_figures import SummaryFigures
 
 # ---------------------------------------------------------------------------
 # Global configuration
@@ -31,21 +29,21 @@ from utils.keyword_analysis import Keyword_analysis
 #   "title"       -> titles only
 #   "description" -> descriptions only
 #   "both"        -> title + description
-TEXT_SOURCE = common.get_configs("analysis_text_source")
-REFERENCE_DATE = common.get_configs("analysis_reference_date")
-FORCE_RECOMPUTE = bool(common.get_configs("force_recompute"))
-RANDOM_SEED = int(common.get_configs("random_seed"))
-N_CLUSTERS = int(common.get_configs("clustering_n_clusters"))
-THEME_DETECTION_MODE = str(common.get_configs("theme_detection_mode"))
-THEME_RULE_VERSION = str(common.get_configs("theme_rule_version"))
+TEXT_SOURCE = settings.get_configs("analysis_text_source")
+REFERENCE_DATE = settings.get_configs("analysis_reference_date")
+FORCE_RECOMPUTE = bool(settings.get_configs("force_recompute"))
+RANDOM_SEED = int(settings.get_configs("random_seed"))
+N_CLUSTERS = int(settings.get_configs("clustering_n_clusters"))
+THEME_DETECTION_MODE = str(settings.get_configs("theme_detection_mode"))
+THEME_RULE_VERSION = str(settings.get_configs("theme_rule_version"))
 
 # Default scaling factor for saved PNG images.
 SCALE = 3
 
-font_family = common.get_configs("font_family")
-font_size = common.get_configs("font_size")
+font_family = settings.get_configs("font_family")
+font_size = settings.get_configs("font_size")
 
-logs(show_level=common.get_configs("logger_level"), show_color=True)
+logs(show_level=settings.get_configs("logger_level"), show_color=True)
 logger = CustomLogger(__name__)
 
 warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"plotly\.io\._kaleido")
@@ -53,10 +51,10 @@ warnings.filterwarnings("ignore", category=DeprecationWarning, module=r"plotly\.
 tool_class = Tools()
 plot_class = Plots()
 pre_process_class = Preprocessing()
-clustering_class = Clustering_utils()
+clustering_class = Clustering()
 summary_class = Summaries()
-viz_summary = Viz_summaries()
-key_class = Keyword_analysis()
+viz_summary = SummaryFigures()
+key_class = KeywordAnalysis()
 
 
 THEME_COLUMNS = [
@@ -101,7 +99,7 @@ def _stamp_publication_settings(df: pd.DataFrame) -> pd.DataFrame:
 
 def write_reproducibility_manifest(json_path: str, data: Dict[str, Any], text_source: str) -> None:
     """Save the exact data digest, analysis settings, and package versions."""
-    analysis_dir = os.path.join(common.output_dir, "analysis")
+    analysis_dir = os.path.join(settings.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
 
     package_names = [
@@ -112,7 +110,6 @@ def write_reproducibility_manifest(json_path: str, data: Dict[str, Any], text_so
         "spacy",
         "umap-learn",
         "plotly",
-        "matplotlib",
         "langdetect",
         "pytubefix",
     ]
@@ -655,7 +652,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
 
        ``likes_per_day = likes / days_since_upload`` for valid entries.
 
-    3. Call :meth:`Clustering_utils.compute_kmeans_elbow` to fit K-means
+    3. Call :meth:`Clustering.compute_kmeans_elbow` to fit K-means
        models over a predefined range of ``k`` values (here ``k=4..20``),
        using the same feature setup as in the main clustering pipeline.
 
@@ -677,7 +674,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
         None. The function is called for its side effects: loading or
         constructing the dataset, computing the K-means inertia curve,
         and logging the results. The full elbow DataFrame is returned
-        by :meth:`Clustering_utils.compute_kmeans_elbow` and captured
+        by :meth:`Clustering.compute_kmeans_elbow` and captured
         in the local variable ``elbow_df``, but it is not written to
         disk directly here.
 
@@ -691,7 +688,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
           ``clustering_class``) are available in the module scope.
     """
     # Derive the path to the analysis directory inside the project output.
-    analysis_dir = os.path.join(common.output_dir, "analysis")
+    analysis_dir = os.path.join(settings.output_dir, "analysis")
 
     # Path to the enriched dataset pickle for the selected text source.
     enriched_pickle = os.path.join(
@@ -707,7 +704,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
         if not _cache_matches_publication_settings(df):
             logger.info("Cached enriched dataset uses different analysis settings; rebuilding it.")
             data = pre_process_class.load_asmr_data(
-                os.path.join(common.get_configs("data"), "asmr_results.json")
+                os.path.join(settings.get_configs("data"), "asmr_results.json")
             )
             df = pre_process_class.json_to_dataframe(
                 data,
@@ -718,7 +715,7 @@ def run_elbow_analysis(text_source: str = "both") -> None:
             df.to_pickle(enriched_pickle)
     else:
         logger.info("No enriched pickle found; building DataFrame from JSON...")
-        json_path = os.path.join(common.get_configs("data"), "asmr_results.json")
+        json_path = os.path.join(settings.get_configs("data"), "asmr_results.json")
         data = pre_process_class.load_asmr_data(json_path)
         df = pre_process_class.json_to_dataframe(
             data,
@@ -1003,7 +1000,7 @@ def print_dataset_summary(df: pd.DataFrame) -> None:
 
 def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> None:
     """Run all analytics, write CSVs into output/analysis, and create Plotly figures."""
-    analysis_dir = os.path.join(common.output_dir, "analysis")
+    analysis_dir = os.path.join(settings.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
 
     enriched_pickle = os.path.join(
@@ -1335,11 +1332,11 @@ def run_analytics_pipeline(data: Dict[str, Any], text_source: str = "both") -> N
 # ============================================================================
 
 def main() -> None:
-    json_path = os.path.join(common.get_configs("data"), "asmr_results.json")
+    json_path = os.path.join(settings.get_configs("data"), "asmr_results.json")
     logger.info(f"Loading ASMR data from {json_path}")
     data = pre_process_class.load_asmr_data(json_path)
 
-    analysis_dir = os.path.join(common.output_dir, "analysis")
+    analysis_dir = os.path.join(settings.output_dir, "analysis")
     os.makedirs(analysis_dir, exist_ok=True)
     write_reproducibility_manifest(json_path, data, TEXT_SOURCE)
 

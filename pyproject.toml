@@ -8,7 +8,6 @@ dependencies = [
     "google-api-python-client>=2.187.0",
     "kaleido==0.2.1",
     "langdetect>=1.0.9",
-    "matplotlib>=3.10.7",
     "pandas>=2.3.3",
     "plotly>=6.4.0",
     "polars>=1.35.2",
@@ -22,3 +21,10 @@ dependencies = [
     "umap-learn>=0.5.9.post2",
     "wordcloud>=1.9.4",
 ]
+
+[tool.ruff]
+line-length = 120
+extend-exclude = ["_output", ".venv"]
+
+[tool.ruff.lint]
+select = ["E", "F", "W", "I"]
