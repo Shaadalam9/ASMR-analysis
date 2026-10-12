@@ -2,7 +2,9 @@ import math
 import unittest
 
 import numpy as np
+import pandas as pd
 
+from asmr.analysis.supplementary.robustness import _subsets, _top_channels
 from asmr.analysis.supplementary.statistics import gini, hhi, shannon, share_top
 from asmr.collection.discover import _is_quota_error, _safe_exc_text
 
@@ -49,3 +51,28 @@ class ApiErrorHandlingTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class RobustnessSubsetTests(unittest.TestCase):
+    def _frame(self):
+        n = 200
+        return pd.DataFrame({
+            "video_id": [f"v{i}" for i in range(n)],
+            "channel_id": [f"c{i % 100}" for i in range(n)],
+            "views": np.arange(n, dtype=float),
+            "upload_year": [2010 + (i % 15) for i in range(n)],
+            "language": ["English" if i % 3 else "Korean" for i in range(n)],
+        })
+
+    def test_top_channels_by_views_returns_the_top_one_percent(self):
+        df = self._frame()
+        top = _top_channels(df, "views")
+        self.assertEqual(len(top), 1)
+        self.assertEqual(top, {"c99"})
+
+    def test_subsets_partition_periods_and_languages(self):
+        subsets = dict(_subsets(self._frame()))
+        periods = ["Uploaded 2008-2015", "Uploaded 2016-2019", "Uploaded 2020-2026"]
+        self.assertEqual(sum(len(subsets[p]) for p in periods), len(subsets["All videos"]))
+        self.assertEqual(len(subsets["English only"]) + len(subsets["Non-English only"]), len(subsets["All videos"]))
+        self.assertLess(len(subsets["Without top 1% of channels by views"]), len(subsets["All videos"]))

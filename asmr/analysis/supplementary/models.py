@@ -112,6 +112,17 @@ def models(df: pd.DataFrame, title_only: bool = False) -> None:
         # within-channel: demean outcome and predictors by channel (absorbs channel fixed effects)
         cnt = pd.Series(groups).map(pd.Series(groups).value_counts()).to_numpy()
         keep = cnt >= 2
+
+        # pooled model on exactly the videos used by the within-channel model: separates the effect of
+        # holding the creator constant from the effect of restricting to channels with several videos
+        coefs_same, r2_same, n_groups_same = _ols_cluster(
+            y[keep], sub.loc[keep, terms].to_numpy(float), groups[keep], terms)
+        coefs_same["model"] = "pooled, same sample as within channel"
+        coefs_same["outcome"] = label
+        coefs_same["n"] = int(keep.sum())
+        coefs_same["n_channels"] = n_groups_same
+        coefs_same["r2"] = r2_same
+        results.append(coefs_same)
         sw = sub[keep]
         g_ser = pd.Series(groups[keep], index=sw.index)
         yw = sw[outcome] - sw[outcome].groupby(g_ser).transform("mean")

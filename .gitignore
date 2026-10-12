@@ -226,3 +226,7 @@ paper/*.fls
 paper/*.log
 paper/*.out
 paper/*-eps-converted-to.pdf
+
+# Manuscript sources are not part of this repository
+paper/
+paper_focused/

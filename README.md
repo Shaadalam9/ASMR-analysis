@@ -12,9 +12,10 @@ This is a descriptive platform-metadata study. It describes what is produced and
 
 1. **Collected** 90,189 videos whose titles contain "ASMR", uploaded between 1 January 2008 and 31 August 2026 (18,126 channels, 81 language categories), using the YouTube Data API in three-month windows plus `pytubefix` search as a supplementary route.
 2. **Enriched** the records with duration, views, likes, upload date, language labels, title-style features and ten rule-based textual theme labels.
-3. **Described** the corpus: language, duration, engagement, themes, and monthly growth.
-4. **Asked four research questions** about genre formation, concentration of attention, format and attention, and the robustness of the text labels (see below).
-5. **Audited** the labels and clustering for sensitivity to language, text field, scaling and the number of clusters.
+3. **Described** the corpus: language, duration, engagement, themes and monthly growth.
+4. **Measured** how supply diversified over time and how concentrated attention is (Gini coefficients, top shares, Herfindahl-Hirschman index, entropy).
+5. **Compared** how duration, themes, language and title style relate to views per day and engagement, with pooled models, models with upload-year fixed effects, and models with channel fixed effects, and checked those results in subsets of the corpus.
+6. **Audited** the text labels and the clustering for sensitivity to language, text field, scaling and the number of clusters.
 
 ```mermaid
 flowchart LR
@@ -24,42 +25,106 @@ flowchart LR
     R[asmr.collection.recover_ids<br/>recover missing IDs] --> C
     C --> D[asmr.analysis.publication<br/>derived measures, themes,<br/>tables, figures, clusters, UMAP]
     D --> E[(_output/analysis/<br/>enriched dataset)]
-    E --> F[asmr.analysis.supplementary<br/>label audit, diversification,<br/>models, cluster diagnostics]
+    E --> F[asmr.analysis.supplementary<br/>label audit, diversification, models,<br/>duration reversal, robustness, cluster diagnostics]
     D --> G[figures/]
     F --> G
 ```
 
 ## Main findings
 
-All numbers come from the deposited snapshot and the fixed reference date of 1 September 2026.
+All numbers come from the deposited snapshot and the fixed reference date of 1 September 2026. The figures behind each finding are in the [figure gallery](#figure-gallery).
 
-**The genre broadened and diversified.** Active channels grew from 285 (2008 to 2011) to 8,248 (2020 to 2023). The share of uploads from the most prolific 1% of channels fell from 83.9% to 18.9%. The non-English share rose from 6.3% to about one third, and the normalised entropy of theme labels rose from 0.65 to 0.93, also when computed for English videos only.
+**The genre broadened and diversified.** Active channels grew from 285 (2008 to 2011) to 8,248 (2020 to 2023). The share of uploads from the most prolific 1% of channels fell from 83.9% to 18.9%. The non-English share rose from 6.3% to about one third, and the normalised entropy of theme labels rose from 0.65 to 0.93, also when computed for English videos only (`ecosystem_diversification`).
 
-[![Structure of supply and attention over time](figures/ecosystem_diversification.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/ecosystem_diversification.html)
+**Attention is extremely concentrated.** The Gini coefficient of views across videos is 0.92. The top 1% of videos hold 49.4% of all views, and the top 1% of channels hold 67.3%. The median video gets 21.9 views per day against a mean of 1,038 (`ecosystem_diversification`, `duration_vs_views`).
 
-**Attention is extremely concentrated.** The Gini coefficient of views across videos is 0.92. The top 1% of videos hold 49.4% of all views, and the top 1% of channels hold 67.3%. The median video gets 21.9 views per day against a mean of 1,038.
+**Means mislead.** Videos under 10 minutes have the highest mean views per day (1,853) but the lowest median (1.2), a mean-to-median ratio of about 1,600 (`duration_reversal`, panel a). The ranking of themes also changes between means and medians.
 
-[![Duration against views](figures/duration_vs_views.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_vs_views.html)
+**Pooled comparisons confound format with creator.** In a pooled model, videos under 10 minutes have about 76% fewer views per day than 10 to 30 minute videos. Within the same channel the difference is small (about 5% in the full sample), and videos over 180 minutes have about 130% more views per day. The same pattern holds on the videos and channels used by the within-channel model (`duration_reversal`, panel b).
 
-**Means mislead.** Videos under 10 minutes have the highest mean views per day (1,853) but the lowest median (1.2). Pooled comparisons confound format with creator: within the same channel, videos over 180 minutes have about 130% more views per day than 10 to 30 minute videos, role-play and ear-focused labels go with about 31% and 35% more, and the penalty for short videos disappears.
+**The within-channel advantage of longer videos is stable.** It is present for English and non-English videos, in all three upload periods, and after excluding the channels with the most views or uploads. The within-channel result for short videos is less stable and varies between about -29% and +12% across subsets (`duration_robustness`).
 
 **Text labels are language dependent.** The English-lexical rules find at least one theme in 54.5% of English videos but only 35.7% of non-English videos. The most common theme depends on whether descriptions are searched (sleep for full text, role play for titles). Extending two rules to ten other languages more than doubles their prevalence among non-English videos without changing their growth profile.
 
-**Cluster structure is weak.** After log-scaling the numeric inputs, k-means is best at k = 4 (silhouette 0.29, Davies-Bouldin 1.14, resampling ARI 0.995). The clusters separate mainly by attention regime and duration, not by subgenre.
+**Cluster structure is weak.** After log-scaling the numeric inputs, k-means is best at k = 4 (silhouette 0.29, Davies-Bouldin 1.14, resampling ARI 0.995). The clusters separate mainly by attention regime and duration, not by subgenre (`kmeans_k_diagnostics`, `cluster_umap_full_static_umap_full`).
 
-[![Cluster-number diagnostics](figures/kmeans_k_diagnostics.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/kmeans_k_diagnostics.html)
+## Figure gallery
 
-[![UMAP of videos coloured by cluster](figures/cluster_scatter_embedding_umap.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_umap.html)
+Every figure is made with Plotly and written to [`figures/`](figures/) as interactive HTML, PNG and EPS (the full static UMAP is PNG and EPS only). Click an image to open the interactive version. The links use [htmlpreview.github.io](https://htmlpreview.github.io/) to render the HTML files stored in this repository. If you prefer, enable GitHub Pages for the repository and replace the prefix of the links, or download the HTML files and open them in a browser. Plotly.js is loaded from a CDN, so an internet connection is needed.
 
-**More figures.**
+### Corpus overview
 
-| Monthly uploads | Language growth over the years |
+| Figure | What it shows |
 | --- | --- |
-| [![Monthly video counts](figures/monthly_video_counts.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/monthly_video_counts.html) | [![Language growth over the years](figures/language_growth_over_years.png)](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_growth_over_years.html) |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_title.html"><img src="figures/wordcloud_title.png" alt="Word cloud of titles" width="300"></a> | The 200 most frequent words in the titles of all videos after stopword removal and text cleaning. Font size is proportional to corpus frequency. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_description.html"><img src="figures/wordcloud_description.png" alt="Word cloud of descriptions" width="300"></a> | The same for video descriptions. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/wordcloud_both.html"><img src="figures/wordcloud_both.png" alt="Word cloud of titles and descriptions" width="300"></a> | The same for the concatenation of title and description, which is the text used for the theme labels and clustering. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/monthly_video_counts.html"><img src="figures/monthly_video_counts.png" alt="Monthly video counts" width="300"></a> | Number of videos uploaded per month. The most recent months are thinly sampled because newly uploaded videos are retrieved less completely. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_vs_views.html"><img src="figures/duration_vs_views.png" alt="Duration against views" width="300"></a> | Log-log density heatmap (70 by 70 bins) of video duration against cumulative views. Colour is the logarithm of the number of videos in a cell. The heatmap shows the heavy tail of views and the mass of videos around 10 to 30 minutes. A faster, zoomable version is [duration_vs_views_interactive.html](https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_vs_views_interactive.html). |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/log_views_qq_plot.html"><img src="figures/log_views_qq_plot.png" alt="Q-Q plot of log views" width="300"></a> | Quantile-quantile plot of log10 views against the normal distribution. The departures in both tails show that even the logarithm of views is not normally distributed. |
 
-Every PNG in this README links to an interactive HTML version of the same figure (hover, zoom and filter). Further interactive figures are in [`figures/`](figures/): theme trends, per-theme growth boxplots, language engagement, title length, and the Q-Q plot of log views. The UMAP shown here is a downsampled interactive version, and the full 90,189-point static map is `figures/cluster_umap_full_static_umap_full.png`.
+### Supply and concentration of attention
 
-> The links use [htmlpreview.github.io](https://htmlpreview.github.io/) to render the HTML files stored in this repository. If you prefer, enable GitHub Pages for the repository and replace the prefix of the links, or download the HTML files and open them in a browser. Plotly.js is loaded from a CDN, so an internet connection is needed.
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/ecosystem_diversification.html"><img src="figures/ecosystem_diversification.png" alt="Structure of supply and attention over time" width="300"></a> | Four panels. (a) Uploads and active channels per year (log scale). (b) Non-English share of uploads and number of language categories. (c) Normalised theme entropy and mean number of theme labels per video. (d) Lorenz curves of cumulative views across videos and channels with Gini coefficients. Together they show supply diversifying while attention stays concentrated. |
+
+### Language and title style
+
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_growth_over_years.html"><img src="figures/language_growth_over_years.png" alt="Language growth over the years" width="300"></a> | Uploads per year for the larger language categories, showing how non-English ASMR grew. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_mean_views_per_day.html"><img src="figures/language_mean_views_per_day.png" alt="Mean views per day by language" width="300"></a> | Mean views per day for language categories with at least 20 videos. Very small categories are noisy. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/language_mean_engagement_rate.html"><img src="figures/language_mean_engagement_rate.png" alt="Mean engagement by language" width="300"></a> | Mean engagement rate (likes divided by views) for language categories with at least 20 videos. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/title_length_mean_views.html"><img src="figures/title_length_mean_views.png" alt="Title length and views" width="300"></a> | Mean views by title-length bucket (up to 5, 6 to 10, 11 to 20, and over 20 words). |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/title_length_mean_engagement_rate.html"><img src="figures/title_length_mean_engagement_rate.png" alt="Title length and engagement" width="300"></a> | Mean engagement rate by the same title-length buckets. |
+
+### Theme labels over time
+
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_whisper_trend_overall_fig.html"><img src="figures/has_whisper_trend_overall_fig.png" alt="Whisper videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the whisper rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_trend_overall_fig.html"><img src="figures/has_no_talking_trend_overall_fig.png" alt="No talking videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the no talking rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_sleep_trend_overall_fig.html"><img src="figures/has_sleep_trend_overall_fig.png" alt="Sleep related videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the sleep related rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_trend_overall_fig.html"><img src="figures/has_binaural_trend_overall_fig.png" alt="Binaural / 3D audio videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the binaural / 3d audio rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_roleplay_trend_overall_fig.html"><img src="figures/has_roleplay_trend_overall_fig.png" alt="Role play videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the role play rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_ear_cleaning_trend_overall_fig.html"><img src="figures/has_ear_cleaning_trend_overall_fig.png" alt="Ear cleaning / ear focus videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the ear cleaning / ear focus rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_mukbang_trend_overall_fig.html"><img src="figures/has_mukbang_trend_overall_fig.png" alt="Mukbang / eating videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the mukbang / eating rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_keyboard_trend_overall_fig.html"><img src="figures/has_keyboard_trend_overall_fig.png" alt="Keyboard / typing videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the keyboard / typing rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_visual_trend_overall_fig.html"><img src="figures/has_visual_trend_overall_fig.png" alt="Visual triggers videos per year" width="300"></a> | Number of videos per upload year whose title or description matches the visual triggers rule. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_drive_trend_overall_fig.html"><img src="figures/has_drive_trend_overall_fig.png" alt="Driving videos per year" width="300"></a> | Number of videos per upload year that match the driving rule. A second copy with the legacy name `drive_trend_overall_fig` is written for compatibility with earlier runs. |
+
+### Theme labels and attention
+
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_whisper_views_per_day_boxplot.html"><img src="figures/has_whisper_views_per_day_boxplot.png" alt="Views per day with and without whisper" width="300"></a> | Views per day for videos with and without the whisper label. Box plots show how skewed views per day is within each group; compare medians, not means. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_no_talking_views_per_day_boxplot.html"><img src="figures/has_no_talking_views_per_day_boxplot.png" alt="Views per day with and without no talking" width="300"></a> | Views per day for videos with and without the no talking label. Box plots show how skewed views per day is within each group; compare medians, not means. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_sleep_views_per_day_boxplot.html"><img src="figures/has_sleep_views_per_day_boxplot.png" alt="Views per day with and without sleep related" width="300"></a> | Views per day for videos with and without the sleep related label. Box plots show how skewed views per day is within each group; compare medians, not means. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_binaural_views_per_day_boxplot.html"><img src="figures/has_binaural_views_per_day_boxplot.png" alt="Views per day with and without binaural / 3d audio" width="300"></a> | Views per day for videos with and without the binaural / 3d audio label. Box plots show how skewed views per day is within each group; compare medians, not means. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/has_drive_views_per_day_boxplot.html"><img src="figures/has_drive_views_per_day_boxplot.png" alt="Views per day with and without driving" width="300"></a> | Views per day for videos with and without the driving label. Box plots show how skewed views per day is within each group; compare medians, not means. |
+
+### Format, creators and attention (duration)
+
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_reversal.html"><img src="figures/duration_reversal.png" alt="Means versus medians and pooled versus within-channel duration associations" width="300"></a> | (a) Mean and median views per day by duration bucket on a log scale: short videos have the highest mean and the lowest median. (b) Ratio of views per day relative to 10 to 30 minute videos from three models: pooled on all videos, pooled on the videos used by the within-channel model, and within channel with channel and year fixed effects. Holding the creator constant changes the association. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/duration_robustness.html"><img src="figures/duration_robustness.png" alt="Stability of the duration associations" width="300"></a> | The same pooled and within-channel ratios (one panel per duration bucket) in eight subsets: all videos, three upload periods, English and non-English videos, and the corpus without the 1% of channels with the most views or the most uploads. The within-channel advantage of longer videos is present in every subset. The within-channel result for short videos varies by subset. |
+
+### Clusters (exploratory)
+
+| Figure | What it shows |
+| --- | --- |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/kmeans_elbow_both.html"><img src="figures/kmeans_elbow_both.png" alt="K-means elbow curve" width="300"></a> | Inertia against the number of clusters k. Shown for completeness; k was not chosen from the elbow. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/kmeans_k_diagnostics.html"><img src="figures/kmeans_k_diagnostics.png" alt="Cluster-number diagnostics" width="300"></a> | (a) Mean silhouette coefficient, (b) Davies-Bouldin index and (c) stability under 80% subsampling (mean adjusted Rand index) for k = 2 to 20. k = 4 is best on silhouette and Davies-Bouldin and is stable. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_umap.html"><img src="figures/cluster_sizes_umap.png" alt="Cluster sizes (UMAP run)" width="300"></a> | Number of videos in each of the four clusters. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_umap.html"><img src="figures/cluster_mean_views_per_day_umap.png" alt="Mean views per day by cluster (UMAP run)" width="300"></a> | Mean views per day in each cluster. One cluster of very short videos stands out. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_umap.html"><img src="figures/cluster_scatter_embedding_umap.png" alt="UMAP scatter coloured by cluster" width="300"></a> | Sampled two-dimensional UMAP projection of the feature space (text, duration, engagement, views per day and language), coloured by k-means cluster, with circles around clusters. Interactive. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_umap_research_umap_research.html"><img src="figures/cluster_umap_research_umap_research.png" alt="Research-style UMAP" width="300"></a> | UMAP projection with labelled clusters and ellipses, downsampled for the browser. |
+| <a href="figures/cluster_umap_full_static_umap_full.png"><img src="figures/cluster_umap_full_static_umap_full.png" alt="Full UMAP of all videos" width="300"></a> | Static UMAP of all 90,189 videos coloured by cluster. Too large for an interactive version. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_sizes_pca.html"><img src="figures/cluster_sizes_pca.png" alt="Cluster sizes (PCA run)" width="300"></a> | Number of videos per cluster in the run whose two-dimensional embedding is PCA. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_mean_views_per_day_pca.html"><img src="figures/cluster_mean_views_per_day_pca.png" alt="Mean views per day by cluster (PCA run)" width="300"></a> | Mean views per day per cluster in the PCA-embedding run. |
+| <a href="https://htmlpreview.github.io/?https://github.com/Shaadalam9/ASMR-analysis/blob/main/figures/cluster_scatter_embedding_pca.html"><img src="figures/cluster_scatter_embedding_pca.png" alt="PCA scatter coloured by cluster" width="300"></a> | Sampled two-dimensional PCA projection coloured by k-means cluster. Interactive. |
 
 ## Repository structure
 
@@ -85,22 +150,19 @@ asmr/                           Python package (run modules with `python -m ...`
       measurement.py            Theme-label audit
       ecosystem.py              Diversification and concentration of attention
       models.py                 Multivariable models with year and channel fixed effects
+      reversal.py               Means versus medians and pooled versus within-channel duration figure
+      robustness.py             Stability of the duration associations across subsets
       cluster_diagnostics.py    Cluster-number diagnostics and stability
       statistics.py             Gini, shares, entropy and HHI
       shared.py                 Paths, data loading and figure/table export
   visualization/
     figures.py                  Plotly figure generation and export
     summary_figures.py          Summary and trend figures
-paper/                          Manuscript sources (LaTeX): main.tex and the double-anonymous Internet Research version
 tests/                          Deterministic unit tests that do not require YouTube access
 figures/                        Generated figures (HTML, PNG, EPS); all figures are made with Plotly
 default.config                  Versioned publication defaults
 pyproject.toml, uv.lock         Dependencies and lint configuration
 ```
-
-## Manuscript
-
-The manuscript sources are in [`paper/`](paper/). `paper/main.tex` follows the section structure of the authors' earlier papers: Introduction (with the aim of the study), Method, Results, Discussion (with limitations and future work, and conclusions), supplementary material and declarations, and appendices for the additional figures and tables. `paper/make_internet_research.py` derives the double-anonymous Internet Research version from `main.tex` into `paper/submission/` (`main.tex`, a bibliography without the authors' own papers, and the figures: structured abstract, no author details or links, Harvard citations, Roman-numeral tables). The script stops if any identifying text is left. Build either version with `latexmk -pdf main.tex` in its folder. The figures are the EPS exports in `paper/figures/`, copied from `figures/`.
 
 ## Reproducibility safeguards
 
@@ -159,7 +221,7 @@ The expected structure is a JSON object keyed by YouTube video identifier:
 }
 ```
 
-For exact reproduction of the paper, use the deposited 90,189 video snapshot rather than recollecting current YouTube values. The snapshot used for the current manuscript has SHA256 digest `b1a25ec911d05fbcea923e74bf66b33cda03be3bf8088ae79b3a08516395ca41` (also written to `_output/analysis/reproducibility_manifest.json` on every run). YouTube statistics and availability change over time.
+For exact reproduction of the reported results, use the deposited 90,189 video snapshot rather than recollecting current YouTube values. The snapshot used for the reported results has SHA256 digest `b1a25ec911d05fbcea923e74bf66b33cda03be3bf8088ae79b3a08516395ca41` (also written to `_output/analysis/reproducibility_manifest.json` on every run). YouTube statistics and availability change over time.
 
 ## Configuration
 
@@ -216,11 +278,11 @@ uv run python -m asmr.analysis.publication
 
 The main machine readable outputs are written to `_output/analysis/`. Publication copies of figures are also written to `figures/`.
 
-The supplementary analyses reported in the manuscript (theme-label audit, diversification and concentration measures, multivariable models, and cluster-number diagnostics) are produced from the enriched dataset written by `asmr.analysis.publication`, so run that first:
+The supplementary analyses (theme-label audit, diversification and concentration measures, multivariable models, duration robustness and cluster-number diagnostics) are produced from the enriched dataset written by `asmr.analysis.publication`, so run that first:
 
 ```bash
 uv run python -m asmr.analysis.supplementary            # all stages
-uv run python -m asmr.analysis.supplementary models     # or: measurement, ecosystem, models, models_title_only, cluster
+uv run python -m asmr.analysis.supplementary models     # or: measurement, ecosystem, models, models_title_only, cluster, reversal, robustness
 ```
 
 Outputs are written to `_output/analysis/extra/` and `figures/`. The `cluster` stage fits k means for k = 2 to 20 and takes about ten to twenty minutes.
@@ -357,6 +419,8 @@ Run after `asmr.analysis.publication`. Each stage writes CSV tables to `_output/
 | `models` | How do duration, themes, language and title style relate to views per day and engagement, with year and channel fixed effects? | `model_coefficients.csv`, `model_block_r2.csv` |
 | `models_title_only` | Do the model results hold when themes are defined from titles only? | `model_coefficients_title_only_themes.csv` |
 | `cluster` | Which number of clusters is supported, and how stable is it? | `kmeans_k_diagnostics.csv`, `kmeans_per_cluster_silhouette.csv`, figure `kmeans_k_diagnostics` |
+| `reversal` | Do means and medians, and pooled and within-channel models, disagree about duration? (run after `models`) | `duration_mean_vs_median.csv`, figure `duration_reversal` |
+| `robustness` | Do the duration associations hold across periods, languages and after excluding prolific channels? | `duration_robustness.csv`, figure `duration_robustness` |
 
 `theme_validation_sample_to_annotate.csv` holds 20 flagged and 20 unflagged videos per theme for manual annotation. No manual precision or recall figure is reported yet.
 
