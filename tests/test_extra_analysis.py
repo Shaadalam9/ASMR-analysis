@@ -4,9 +4,11 @@ import unittest
 import numpy as np
 import pandas as pd
 
+from asmr.analysis.release import DICTIONARY
 from asmr.analysis.supplementary.robustness import _subsets, _top_channels
 from asmr.analysis.supplementary.statistics import gini, hhi, shannon, share_top
 from asmr.collection.discover import _is_quota_error, _safe_exc_text
+from asmr.processing.preprocessing import THEME_REGEX_PATTERNS
 
 
 class ConcentrationMeasureTests(unittest.TestCase):
@@ -76,3 +78,17 @@ class RobustnessSubsetTests(unittest.TestCase):
         self.assertEqual(sum(len(subsets[p]) for p in periods), len(subsets["All videos"]))
         self.assertEqual(len(subsets["English only"]) + len(subsets["Non-English only"]), len(subsets["All videos"]))
         self.assertLess(len(subsets["Without top 1% of channels by views"]), len(subsets["All videos"]))
+
+
+class ReleaseTests(unittest.TestCase):
+    def test_dictionary_variables_are_unique_and_cover_all_themes(self):
+        names = [row[0] for row in DICTIONARY]
+        self.assertEqual(len(names), len(set(names)))
+        self.assertTrue(set(THEME_REGEX_PATTERNS) <= set(names))
+
+    def test_theme_rules_match_expected_phrases(self):
+        import re
+        hit = lambda col, text: bool(re.search(THEME_REGEX_PATTERNS[col], text, re.IGNORECASE))  # noqa: E731
+        self.assertTrue(hit("has_whisper", "Whispering for sleep"))
+        self.assertTrue(hit("has_sleep", "ASMR for sleep"))
+        self.assertFalse(hit("has_whisper", "A loud video"))

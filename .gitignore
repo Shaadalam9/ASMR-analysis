@@ -230,3 +230,5 @@ paper/*-eps-converted-to.pdf
 # Manuscript sources are not part of this repository
 paper/
 paper_focused/
+data_article/
+release/

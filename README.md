@@ -492,6 +492,16 @@ Before scaling, missing values in the three numeric clustering features are medi
 
 K means uses \(k=4\) (selected using silhouette, Davies Bouldin, and resampling stability diagnostics; see `python -m asmr.analysis.supplementary cluster`), seed 42, and ten initialisations. The numeric inputs are log transformed because raw duration, engagement, and views per day are heavy tailed and otherwise let a handful of extreme videos define whole clusters. UMAP is a visual projection of the fitted feature space, not a definitive taxonomy of ASMR subgenres. The two dimensional UMAP uses 50 TruncatedSVD components, 30 neighbours, minimum distance 0.1, cosine distance, and seed 42.
 
+## Build a public dataset release
+
+`asmr.analysis.release` turns the enriched dataset into the files for a repository deposit (for example Zenodo). Run it after `asmr.analysis.publication`:
+
+```bash
+uv run python -m asmr.analysis.release
+```
+
+It writes `release/` (ignored by git) with everything that was collected: `asmr_results.json.gz` (the complete source snapshot, with its SHA-256 digest recorded in the manifest), `seen_video_ids.txt` (all identifiers seen by the collector) and `asmr_videos.csv.gz` (the 45-variable video table, including the original language code, the provenance status and the status of likes). It also writes `data_dictionary.csv` (type, unit, description and missing count of each variable), `raw_snapshot_schema.csv` (fields of the source snapshot), `theme_rules.csv` (the ten regular expressions and the rule version), `reproducibility_manifest.json`, `release_summary.json` and `SHA256SUMS.txt`. The command stops if the snapshot in the data folder differs from the one the analysis used. Nothing is uploaded. Check the YouTube API Services Terms of Service and your institution's policy before publishing titles, descriptions and channel names.
+
 ## Supplementary analyses (`asmr.analysis.supplementary`)
 
 Run after `asmr.analysis.publication`. Each stage writes CSV tables to `_output/analysis/extra/`.

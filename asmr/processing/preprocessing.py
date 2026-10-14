@@ -18,6 +18,21 @@ _NLP_CACHE: Optional["spacy.language.Language"] = None  # type: ignore[valid-typ
 tool_class = Tools()
 
 
+# Rule-based theme patterns (case-insensitive, applied to the lower-cased title and/or description).
+THEME_REGEX_PATTERNS: Dict[str, str] = {
+    "has_whisper": r"\bwhisper(?:s|ing|ed)?\b",
+    "has_no_talking": r"\b(no[-\s]?talk(?:ing)?|without\s+talking|no\s+speaking)\b",
+    "has_sleep": r"\b(sleep|sleeping|sleepy|insomnia)\b|for\s+sleep",
+    "has_binaural": r"\b(binaural|3dio|3d\s+audio|3d\s+sound|8d\s+audio|8d\s+sound)\b",
+    "has_roleplay": r"\b(role[-\s]?play|roleplay|rp|exam|check[-\s]?up|haircut|barber)\b",
+    "has_ear_cleaning": r"\b(ear\s+(cleaning|massage|exam|attention|brushing)|otoscope)\b",
+    "has_mukbang": r"\b(mukbang|eating\s+asmr|eating\s+sounds|eating\s+show)\b",
+    "has_keyboard": r"\b(keyboard|typing|typewriter|typing\s+sounds?)\b",
+    "has_visual": r"\b(visuals?|visual\s+triggers?|hand\s+movements?|slow\s+movements?|trigger\s+assortment)\b",
+    "has_drive": r"\b(driv(?:e|es|ing)|drive\s+with\s+me|car|road\s+trip)\b",
+}
+
+
 class Preprocessing():
     def __init__(self) -> None:
         pass
@@ -433,33 +448,7 @@ class Preprocessing():
         cannot be loaded in a fresh environment. The rules intentionally mirror
         the main spaCy-assisted detector but avoid tokenisation dependencies.
         """
-        patterns = {
-            "has_whisper": re.compile(r"\bwhisper(?:s|ing|ed)?\b", re.IGNORECASE),
-            "has_no_talking": re.compile(
-                r"\b(no[-\s]?talk(?:ing)?|without\s+talking|no\s+speaking)\b",
-                re.IGNORECASE,
-            ),
-            "has_sleep": re.compile(r"\b(sleep|sleeping|sleepy|insomnia)\b|for\s+sleep", re.IGNORECASE),
-            "has_binaural": re.compile(
-                r"\b(binaural|3dio|3d\s+audio|3d\s+sound|8d\s+audio|8d\s+sound)\b",
-                re.IGNORECASE,
-            ),
-            "has_roleplay": re.compile(
-                r"\b(role[-\s]?play|roleplay|rp|exam|check[-\s]?up|haircut|barber)\b",
-                re.IGNORECASE,
-            ),
-            "has_ear_cleaning": re.compile(
-                r"\b(ear\s+(cleaning|massage|exam|attention|brushing)|otoscope)\b",
-                re.IGNORECASE,
-            ),
-            "has_mukbang": re.compile(r"\b(mukbang|eating\s+asmr|eating\s+sounds|eating\s+show)\b", re.IGNORECASE),
-            "has_keyboard": re.compile(r"\b(keyboard|typing|typewriter|typing\s+sounds?)\b", re.IGNORECASE),
-            "has_visual": re.compile(
-                r"\b(visuals?|visual\s+triggers?|hand\s+movements?|slow\s+movements?|trigger\s+assortment)\b",
-                re.IGNORECASE,
-            ),
-            "has_drive": re.compile(r"\b(driv(?:e|es|ing)|drive\s+with\s+me|car|road\s+trip)\b", re.IGNORECASE),
-        }
+        patterns = {col: re.compile(rule, re.IGNORECASE) for col, rule in THEME_REGEX_PATTERNS.items()}
 
         for idx, text in zip(df.index, texts):
             txt = text if isinstance(text, str) else ""
