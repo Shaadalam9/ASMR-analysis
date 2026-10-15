@@ -13,6 +13,7 @@ authors:
     website: "https://bazilinskyy.github.io"
 repository-code: "https://github.com/Shaadalam9/ASMR-analysis"
 license: MIT
+doi: 10.5281/zenodo.23398907
 abstract: >-
   Open-source pipeline that collects and enriches public metadata of explicitly labelled ASMR videos on YouTube,
   derives video-level variables and rule-based theme indicators, runs the analyses and figures, and builds the

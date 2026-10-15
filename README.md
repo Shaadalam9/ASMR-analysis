@@ -1,5 +1,7 @@
 # ASMR on YouTube: a multilingual, longitudinal analysis
 
+[![DOI](https://zenodo.org/badge/DOI/10.5281/zenodo.23398907.svg)](https://doi.org/10.5281/zenodo.23398907)
+
 Code for collecting, enriching and analysing metadata of explicitly labelled ASMR videos on YouTube, and for reproducing the figures, tables and supplementary analyses of:
 
 > Alam, M. S., and Bazilinskyy, P. (2026). *Nineteen years of ASMR on YouTube: A multilingual, theme-level analysis of 90,189 videos*. Manuscript in preparation.
