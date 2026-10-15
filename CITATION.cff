@@ -1,0 +1,37 @@
+cff-version: 1.2.0
+message: "If you use this code or the ASMR dataset, please cite it as below."
+title: "ASMR-analysis: collection and analysis pipeline for ASMR videos on YouTube"
+type: software
+authors:
+  - family-names: Alam
+    given-names: Md Shadab
+    email: m.s.alam@tue.nl
+    affiliation: "Eindhoven University of Technology"
+  - family-names: Bazilinskyy
+    given-names: Pavlo
+    affiliation: "Eindhoven University of Technology"
+    website: "https://bazilinskyy.github.io"
+repository-code: "https://github.com/Shaadalam9/ASMR-analysis"
+license: MIT
+abstract: >-
+  Open-source pipeline that collects and enriches public metadata of explicitly labelled ASMR videos on YouTube,
+  derives video-level variables and rule-based theme indicators, runs the analyses and figures, and builds the
+  public dataset release.
+keywords:
+  - ASMR
+  - YouTube
+  - video metadata
+  - multilingual
+  - platform data
+references:
+  - type: dataset
+    title: "A multilingual metadata dataset of 90,189 explicitly labelled ASMR videos uploaded to YouTube between 2008 and 2026"
+    authors:
+      - family-names: Alam
+        given-names: Md Shadab
+      - family-names: Bazilinskyy
+        given-names: Pavlo
+    year: 2026
+    publisher:
+      name: "4TU.ResearchData"
+    doi: 10.4121/98d9d428-5fa4-4f55-b817-a66e1030e0eb

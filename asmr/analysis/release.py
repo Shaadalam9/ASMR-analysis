@@ -14,6 +14,8 @@ import hashlib
 import json
 import os
 import shutil
+import sys
+import zipfile
 
 import pandas as pd
 
@@ -251,5 +253,84 @@ def build_release() -> None:
     logger.info("Release written to {} ({} videos)", RELEASE_DIR, len(out))
 
 
-if __name__ == "__main__":
+SUPPLEMENT_NAME = "Supplementary material"
+CODE_FILES = [
+    ".python-version", "LICENSE", "SECURITY.md", "analysis.py", "common.py", "custom_logger.py", "default.config",
+    "default.secret", "logmod.py", "main.py", "pyproject.toml", "uv.lock",
+]
+CODE_DIRS = ["asmr", "tests"]
+CITATION = (
+    "Alam, M. S., & Bazilinskyy, P. (2026). A multilingual metadata dataset of 90,189 explicitly labelled ASMR videos "
+    "uploaded to YouTube between 2008 and 2026. Manuscript submitted to Data in Brief."
+)
+
+
+def _readme_text(config_keys: dict) -> str:
+    descriptions = {
+        "data": "directory with the dataset; in this package \"../data\", relative to the folder \"code\".",
+        "query": "search term used for collection; the lower-cased term must also appear in the video title.",
+        "analysis_text_source": "text used for text-based analyses: \"title\", \"description\" or \"both\".",
+        "date_before": "optional upper bound (YYYY-MM-DD) for the upload dates collected; null means up to today.",
+        "date_after": "optional lower bound (YYYY-MM-DD) for the upload dates collected; null means no lower bound.",
+        "date": "older single-date setting, used as the upper bound when \"date_before\" is null.",
+        "date_window_months": "size in months of the upload-date windows that the YouTube API search is split into.",
+        "analysis_reference_date": "fixed date used as the denominator of daily rates (views per day, likes per day).",
+        "theme_detection_mode": "method for the theme indicators; \"rule_based\" uses the regular expressions in "
+                                "data/theme_rules.csv.",
+        "theme_rule_version": "version of the theme rules, recorded in the outputs.",
+        "force_recompute": "rebuild outputs instead of reusing cached files.",
+        "refresh_existing_statistics": "whether the enrichment step may overwrite existing view and like counts; "
+                                       "keep false.",
+        "random_seed": "seed for clustering, UMAP and sampling.",
+        "clustering_n_clusters": "number of k-means clusters in the exploratory clustering.",
+        "auto_open_plots": "if true, opens every saved HTML figure in the browser; keep false for batch runs.",
+        "font_family": "font family used in the generated figures.",
+        "font_size": "font size used in the generated figures.",
+        "plotly_template": "template used to make the figures.",
+        "logger_level": "logging level, for example \"info\".",
+    }
+    config_lines = [f'* "{k}": {descriptions.get(k, "see code/default.config.")}' for k in config_keys]
+    template_path = os.path.join(os.path.dirname(__file__), "release_readme.txt")
+    with open(template_path, encoding="utf-8") as handle:
+        template = handle.read()
+    return template.replace("{citation}", CITATION).replace("{config_lines}", "\n".join(config_lines))
+
+
+def build_supplementary_zip(target: str) -> None:
+    """Write ``target``: a zip with readme.txt, code/ and data/, laid out like a journal supplementary package."""
     build_release()
+    root = common.root_dir
+    with open(os.path.join(root, "default.config"), encoding="utf-8") as handle:
+        config = json.load(handle)
+    packaged_config = {**config, "data": "../data"}
+    base = SUPPLEMENT_NAME + "/"
+    skip = {"__pycache__", ".DS_Store", ".ruff_cache", ".pytest_cache"}
+    with zipfile.ZipFile(target, "w", zipfile.ZIP_DEFLATED) as archive:
+        archive.writestr(base + "readme.txt", _readme_text(config))
+        for name in CODE_FILES:
+            if name == "default.config":
+                archive.writestr(base + "code/default.config", json.dumps(packaged_config, indent=4) + "\n")
+            elif name == "pyproject.toml":
+                with open(os.path.join(root, name), encoding="utf-8") as handle:
+                    text = "".join(line for line in handle if not line.startswith("readme ="))
+                archive.writestr(base + "code/pyproject.toml", text)
+            else:
+                archive.write(os.path.join(root, name), base + "code/" + name)
+        for folder in CODE_DIRS:
+            for dirpath, dirnames, filenames in os.walk(os.path.join(root, folder)):
+                dirnames[:] = sorted(d for d in dirnames if d not in skip)
+                for filename in sorted(filenames):
+                    if filename in skip or filename.endswith(".pyc"):
+                        continue
+                    path = os.path.join(dirpath, filename)
+                    archive.write(path, base + "code/" + os.path.relpath(path, root))
+        for name in sorted(os.listdir(RELEASE_DIR)):
+            archive.write(os.path.join(RELEASE_DIR, name), base + "data/" + name)
+    logger.info("Supplementary package written to {} ({:.1f} MB)", target, os.path.getsize(target) / 1e6)
+
+
+if __name__ == "__main__":
+    if len(sys.argv) > 2 and sys.argv[1] == "--zip":
+        build_supplementary_zip(sys.argv[2])
+    else:
+        build_release()
