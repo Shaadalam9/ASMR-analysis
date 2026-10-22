@@ -34,5 +34,5 @@ references:
         given-names: Pavlo
     year: 2026
     publisher:
-      name: "4TU.ResearchData"
-    doi: 10.4121/98d9d428-5fa4-4f55-b817-a66e1030e0eb
+      name: "Zenodo"
+    doi: 10.5281/zenodo.23574347

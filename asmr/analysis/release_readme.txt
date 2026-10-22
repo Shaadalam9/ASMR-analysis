@@ -60,3 +60,4 @@ Notes:
 * The code was tested with Python 3.12.13.
 * The data are public video metadata obtained through the YouTube Data API and the public search interface. Please comply with the YouTube Terms of Service and applicable data protection law.
 * The snapshot does not store per-record collection timestamps; counts were retrieved at different times.
+* The dataset is also published and openly available in Zenodo: https://doi.org/10.5281/zenodo.23574347 (DOI 10.5281/zenodo.23574347). The code is archived in Zenodo: https://doi.org/10.5281/zenodo.23398907.
